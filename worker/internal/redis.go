@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"aether/shared/logger"
 	"context"
 
 	redis "github.com/redis/go-redis/v9"
@@ -16,5 +17,14 @@ func NewRedisClient(addr string) (*redis.Client, error) {
 		return nil, err
 	}
 
+	logger.Info("connected to redis", "addr", addr)
 	return client, nil
+}
+
+func CloseRedisClient(client *redis.Client) error {
+	if err := client.Close(); err != nil {
+		logger.Error("failed to close redis client", "error", err)
+		return err
+	}
+	return nil
 }

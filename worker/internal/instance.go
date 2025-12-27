@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"aether/shared/logger"
 	"aether/shared/network"
 	"aether/shared/vm"
 	"fmt"
@@ -37,14 +38,15 @@ func NewInstance(functionID string, vmMgr *vm.Manager, bridgeMgr *network.Bridge
 }
 
 func (i *Instance) Start(cfg InstanceConfig) error {
-	// Allocate IP
+	log := logger.With("function", i.FunctionID)
+
 	vmIP, err := i.bridgeMgr.AllocateVMIP()
 	if err != nil {
 		return fmt.Errorf("failed to allocate IP: %w", err)
 	}
 	i.vmIP = vmIP
+	log.Debug("allocated IP", "ip", vmIP)
 
-	// Create TAP device
 	tapName := i.bridgeMgr.NextTAPName()
 	tap, err := i.bridgeMgr.CreateTAPDevice(tapName)
 	if err != nil {
@@ -52,8 +54,8 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		return fmt.Errorf("failed to create TAP: %w", err)
 	}
 	i.tap = tap
+	log.Debug("created TAP", "tap", tapName)
 
-	// Attach TAP to bridge
 	if err := i.bridgeMgr.AttachTAPToBridge(tap.Name); err != nil {
 		i.bridgeMgr.DeleteTAPDevice(tap.Name)
 		i.bridgeMgr.ReleaseVMIP(vmIP)
@@ -72,6 +74,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
 	}
 
+	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB)
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
 	if err != nil {
 		i.bridgeMgr.DeleteTAPDevice(tap.Name)
@@ -80,18 +83,23 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	}
 	i.vm = vmInstance
 
+	log.Info("VM launched", "ip", vmIP, "tap", tapName)
 	return nil
 }
 
 func (i *Instance) WaitReady(port int, timeout time.Duration) error {
+	log := logger.With("function", i.FunctionID, "ip", i.vmIP, "port", port)
 	url := fmt.Sprintf("http://%s:%d/", i.vmIP, port)
 	client := &http.Client{Timeout: 1 * time.Second}
 	deadline := time.Now().Add(timeout)
+
+	log.Debug("waiting for instance ready")
 
 	for time.Now().Before(deadline) {
 		resp, err := client.Get(url)
 		if err == nil && resp.StatusCode < 500 {
 			resp.Body.Close()
+			log.Info("instance ready")
 			return nil
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -101,15 +109,22 @@ func (i *Instance) WaitReady(port int, timeout time.Duration) error {
 }
 
 func (i *Instance) Stop() error {
+	log := logger.With("function", i.FunctionID)
+
 	if i.vm != nil {
+		log.Debug("stopping VM")
 		i.vm.Stop()
 	}
 	if i.tap != nil {
+		log.Debug("deleting TAP", "tap", i.tap.Name)
 		i.bridgeMgr.DeleteTAPDevice(i.tap.Name)
 	}
 	if i.vmIP != "" {
+		log.Debug("releasing IP", "ip", i.vmIP)
 		i.bridgeMgr.ReleaseVMIP(i.vmIP)
 	}
+
+	log.Info("instance stopped")
 	return nil
 }
 

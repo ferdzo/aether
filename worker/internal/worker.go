@@ -1,13 +1,13 @@
 package internal
 
 import (
+	"aether/shared/logger"
 	"aether/shared/network"
 	"aether/shared/protocol"
 	"aether/shared/vm"
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"path/filepath"
 	"sync"
 	"time"
@@ -46,7 +46,7 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 		return fmt.Errorf("failed to connect to redis: %w", err)
 	}
 
-	log.Printf("Watching queue: %s", protocol.QueueVMProvision)
+	logger.Info("watching queue", "queue", protocol.QueueVMProvision)
 
 	for {
 		select {
@@ -61,9 +61,8 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 				continue
 			}
 
-			// result[0] is queue name, result[1] is the job data
 			if err := w.handleJob([]byte(result[1])); err != nil {
-				log.Printf("Error handling job: %v", err)
+				logger.Error("job failed", "error", err)
 			}
 		}
 	}
@@ -75,13 +74,14 @@ func (w *Worker) handleJob(job []byte) error {
 		return fmt.Errorf("failed to unmarshal job: %w", err)
 	}
 
-	log.Printf("Received job: %s (function: %s)", jobData.RequestID, jobData.FunctionID)
+	log := logger.With("request_id", jobData.RequestID, "function", jobData.FunctionID)
+	log.Info("received job")
 
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if _, exists := w.instances[jobData.FunctionID]; exists {
-		log.Printf("Function %s already running", jobData.FunctionID)
+		log.Info("function already running")
 		return nil
 	}
 
@@ -119,7 +119,7 @@ func (w *Worker) handleJob(job []byte) error {
 
 	w.instances[jobData.FunctionID] = instance
 
-	log.Printf("Function %s started (IP: %s, Port: %d)", jobData.FunctionID, instance.GetVMIP(), proxyPort)
+	log.Info("function started", "vm_ip", instance.GetVMIP(), "proxy_port", proxyPort)
 
 	// TODO: Register in etcd
 
@@ -131,7 +131,7 @@ func (w *Worker) Shutdown() error {
 	defer w.mu.Unlock()
 
 	for id, instance := range w.instances {
-		log.Printf("Stopping instance: %s", id)
+		logger.Info("stopping instance", "function", id)
 		instance.Stop()
 	}
 
