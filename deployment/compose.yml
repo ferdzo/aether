@@ -1,0 +1,23 @@
+services:
+
+  redis:
+    image: redis:8
+    ports:
+      - 6379:6379
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  etcd:
+    image: quay.io/coreos/etcd:v2.3.8
+    ports:
+      - 2379:2379
+    volumes:
+      - etcd_data:/bitnami
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_CLUSTER=default=http://0.0.0.0:2380

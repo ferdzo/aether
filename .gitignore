@@ -1,0 +1,22 @@
+# Environment
+.env
+
+# Binaries
+/agent
+/benchmark
+
+# Rootfs and code images (large files)
+*.ext4
+
+# Kernel images
+vmlinux*
+
+# SSH keys
+*.pem
+id_rsa*
+vm_key*
+
+# IDE
+.idea/
+.vscode/
+*.swp
