@@ -10,13 +10,14 @@ import (
 )
 
 type Instance struct {
-	FunctionID string
-	vmMgr      *vm.Manager
-	bridgeMgr  *network.BridgeManager
-	vm         *vm.VM
-	tap        *network.TAPDevice
-	vmIP       string
-	proxyPort  int
+	FunctionID  string
+	vmMgr       *vm.Manager
+	bridgeMgr   *network.BridgeManager
+	vm          *vm.VM
+	tap         *network.TAPDevice
+	vmIP        string
+	proxyPort   int
+	proxyServer *http.Server
 }
 
 type InstanceConfig struct {
@@ -74,7 +75,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
 	}
 
-	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB)
+	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "code_path", cfg.CodePath)
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
 	if err != nil {
 		i.bridgeMgr.DeleteTAPDevice(tap.Name)
@@ -108,9 +109,38 @@ func (i *Instance) WaitReady(port int, timeout time.Duration) error {
 	return fmt.Errorf("instance not ready after %v", timeout)
 }
 
+func (i *Instance) StartProxy(listenPort int, targetPort int) error {
+	log := logger.With("function", i.FunctionID)
+
+	targetURL := fmt.Sprintf("http://%s:%d", i.vmIP, targetPort)
+	proxy := NewProxy(targetURL)
+	if proxy == nil {
+		return fmt.Errorf("failed to create proxy for %s", targetURL)
+	}
+
+	i.proxyPort = listenPort
+	i.proxyServer = &http.Server{
+		Addr:    fmt.Sprintf(":%d", listenPort),
+		Handler: proxy,
+	}
+
+	go func() {
+		log.Info("proxy started", "listen_port", listenPort, "target", targetURL)
+		if err := i.proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error("proxy error", "error", err)
+		}
+	}()
+
+	return nil
+}
+
 func (i *Instance) Stop() error {
 	log := logger.With("function", i.FunctionID)
 
+	if i.proxyServer != nil {
+		log.Debug("stopping proxy")
+		i.proxyServer.Close()
+	}
 	if i.vm != nil {
 		log.Debug("stopping VM")
 		i.vm.Stop()

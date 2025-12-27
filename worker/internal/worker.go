@@ -20,15 +20,17 @@ type Worker struct {
 	instances map[string]*Instance
 	mu        sync.Mutex
 	nextPort  int
+	registry  *Registry
 }
 
-func NewWorker(cfg *Config) *Worker {
+func NewWorker(cfg *Config, registry *Registry) *Worker {
 	return &Worker{
 		cfg:       cfg,
 		vmMgr:     vm.NewManager(cfg.FirecrackerBin),
 		bridgeMgr: network.NewBridgeManager(cfg.BridgeName, cfg.BridgeCIDR),
 		instances: make(map[string]*Instance),
 		nextPort:  30000,
+		registry:  registry,
 	}
 }
 
@@ -110,18 +112,24 @@ func (w *Worker) handleJob(job []byte) error {
 
 	proxyPort := w.nextPort
 	w.nextPort++
-	instance.SetProxyPort(proxyPort)
 
 	if err := instance.WaitReady(w.cfg.FunctionPort, 30*time.Second); err != nil {
 		instance.Stop()
 		return fmt.Errorf("instance not ready: %w", err)
 	}
 
+	if err := instance.StartProxy(proxyPort, w.cfg.FunctionPort); err != nil {
+		instance.Stop()
+		return fmt.Errorf("failed to start proxy: %w", err)
+	}
+
 	w.instances[jobData.FunctionID] = instance
 
 	log.Info("function started", "vm_ip", instance.GetVMIP(), "proxy_port", proxyPort)
 
-	// TODO: Register in etcd
+	if err := w.registry.RegisterInstance(jobData.FunctionID, proxyPort, instance.vmIP); err != nil {
+		return fmt.Errorf("failed to register instance: %w", err)
+	}
 
 	return nil
 }

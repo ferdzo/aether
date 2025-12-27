@@ -77,13 +77,18 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 
 	if cfg.CodeDrivePath != "" {
 		if _, err := os.Stat(cfg.CodeDrivePath); err == nil {
+			fmt.Printf("[VM] Adding code drive: %s\n", cfg.CodeDrivePath)
 			drives = append(drives, models.Drive{
 				DriveID:      firecracker.String("code"),
 				PathOnHost:   firecracker.String(cfg.CodeDrivePath),
 				IsRootDevice: firecracker.Bool(false),
 				IsReadOnly:   firecracker.Bool(true),
 			})
+		} else {
+			fmt.Printf("[VM] Code drive not found: %s (err: %v)\n", cfg.CodeDrivePath, err)
 		}
+	} else {
+		fmt.Println("[VM] No code drive path specified")
 	}
 
 	fcCfg := firecracker.Config{
@@ -111,6 +116,8 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(m.FirecrackerBin).
 		WithSocketPath(cfg.SocketPath).
+		WithStdout(os.Stdout).
+		WithStderr(os.Stderr).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))
