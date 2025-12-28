@@ -1,5 +1,7 @@
 package internal
 
+import "time"
+
 type Config struct {
     WorkerID       string
     WorkerIP       string
@@ -15,3 +17,11 @@ type Config struct {
     FunctionPort   int
 }
 
+type ScalingConfig struct {
+    Enabled           bool
+    CheckInterval     time.Duration 
+    ScaleUpThreshold  int
+    ScaleDownAfter    time.Duration 
+    MinInstances      int
+    MaxInstances      int
+}

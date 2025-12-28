@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -70,6 +71,15 @@ func main() {
 
 
 	worker := internal.NewWorker(config, registry)
+	scalingCfg := internal.ScalingConfig{
+		Enabled: true,
+		CheckInterval: 1 * time.Second,
+		ScaleUpThreshold: 5,
+		ScaleDownAfter: 30 * time.Second,
+		MinInstances: 1,
+		MaxInstances: 10,
+	}
+	scaler := internal.NewScaler(worker, &scalingCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -80,10 +90,13 @@ func main() {
 		logger.Info("shutting down...")
 		cancel()
 	}()
+	go scaler.Run(ctx)
 
 	if err := worker.Run(ctx); err != nil {
 		logger.Error("worker error", "error", err)
 	}
+		go scaler.Run(ctx)
+
 
 	worker.Shutdown()
 	os.Exit(0)

@@ -1,23 +1,44 @@
 package internal
 
 import (
+	"aether/shared/id"
 	"aether/shared/logger"
 	"aether/shared/network"
 	"aether/shared/vm"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
+type InstanceStatus string
+
+const (
+	StatusStarting InstanceStatus = "starting"
+	StatusReady    InstanceStatus = "ready"
+	StatusStopping InstanceStatus = "stopping"
+	StatusStopped  InstanceStatus = "stopped"
+	StatusError    InstanceStatus = "error"
+)
+
 type Instance struct {
-	FunctionID  string
-	vmMgr       *vm.Manager
-	bridgeMgr   *network.BridgeManager
-	vm          *vm.VM
-	tap         *network.TAPDevice
-	vmIP        string
-	proxyPort   int
-	proxyServer *http.Server
+	ID              string
+	FunctionID      string
+	Status          InstanceStatus
+	StartedAt       time.Time
+	VCPU            int64
+	MemMB           int64
+	vmMgr           *vm.Manager
+	bridgeMgr       *network.BridgeManager
+	vm              *vm.VM
+	tap             *network.TAPDevice
+	vmIP            string
+	activeRequests  int64
+	lastRequestTime time.Time
+	proxyPort       int
+	proxyServer     *http.Server
+	mu              sync.Mutex
 }
 
 type InstanceConfig struct {
@@ -30,16 +51,44 @@ type InstanceConfig struct {
 	FunctionPort int
 }
 
+func (i *Instance) IncrementActiveRequests() {
+	atomic.AddInt64(&i.activeRequests, 1)
+	i.mu.Lock()
+	i.lastRequestTime = time.Now()
+	i.mu.Unlock()
+}
+
+func (i *Instance) DecrementActiveRequests() {
+	atomic.AddInt64(&i.activeRequests, -1)
+}
+
+func (i *Instance) GetActiveRequests() int64 {
+	return atomic.LoadInt64(&i.activeRequests)
+}
+
+func (i* Instance) IdleDuration() time.Duration{
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.lastRequestTime.IsZero() {
+		return time.Since(i.StartedAt)
+	}
+	return time.Since(i.lastRequestTime)
+}
+
 func NewInstance(functionID string, vmMgr *vm.Manager, bridgeMgr *network.BridgeManager) *Instance {
 	return &Instance{
+		ID:         id.GenerateInstanceID(),
 		FunctionID: functionID,
+		Status:     StatusStarting,
+		StartedAt:  time.Now(),
 		vmMgr:      vmMgr,
 		bridgeMgr:  bridgeMgr,
 	}
 }
 
 func (i *Instance) Start(cfg InstanceConfig) error {
-	log := logger.With("function", i.FunctionID)
+	log := logger.With("instance", i.ID, "function", i.FunctionID)
+	i.Status = StatusStarting
 
 	vmIP, err := i.bridgeMgr.AllocateVMIP()
 	if err != nil {
@@ -75,6 +124,9 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
 	}
 
+	i.VCPU = cfg.VCPUCount
+	i.MemMB = cfg.MemSizeMB
+
 	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "code_path", cfg.CodePath)
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
 	if err != nil {
@@ -85,6 +137,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	i.vm = vmInstance
 
 	log.Info("VM launched", "ip", vmIP, "tap", tapName)
+	i.Status = StatusReady
 	return nil
 }
 
@@ -113,7 +166,7 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 	log := logger.With("function", i.FunctionID)
 
 	targetURL := fmt.Sprintf("http://%s:%d", i.vmIP, targetPort)
-	proxy := NewProxy(targetURL)
+	proxy := NewProxy(targetURL, i)
 	if proxy == nil {
 		return fmt.Errorf("failed to create proxy for %s", targetURL)
 	}
@@ -135,7 +188,8 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 }
 
 func (i *Instance) Stop() error {
-	log := logger.With("function", i.FunctionID)
+	log := logger.With("instance", i.ID, "function", i.FunctionID)
+	i.Status = StatusStopping
 
 	if i.proxyServer != nil {
 		log.Debug("stopping proxy")
@@ -154,8 +208,13 @@ func (i *Instance) Stop() error {
 		i.bridgeMgr.ReleaseVMIP(i.vmIP)
 	}
 
+	i.Status = StatusStopped
 	log.Info("instance stopped")
 	return nil
+}
+
+func (i *Instance) GetID() string {
+	return i.ID
 }
 
 func (i *Instance) GetVMIP() string {
@@ -166,6 +225,10 @@ func (i *Instance) GetProxyPort() int {
 	return i.proxyPort
 }
 
-func (i *Instance) SetProxyPort(port int) {
-	i.proxyPort = port
+func (i *Instance) GetStatus() InstanceStatus {
+	return i.Status
+}
+
+func (i *Instance) SetStatus(status InstanceStatus) {
+	i.Status = status
 }

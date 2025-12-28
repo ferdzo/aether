@@ -11,6 +11,10 @@ func GenerateVMID() string {
 	return "vm-" + xid.New().String()
 }
 
+func GenerateInstanceID() string {
+	return "inst-" + xid.New().String()
+}
+
 func GenerateRequestID() string {
 	return "req-" + xid.New().String()
 }

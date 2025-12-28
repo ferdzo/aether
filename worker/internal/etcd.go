@@ -91,13 +91,13 @@ func (r *Registry) RegisterWorker() (func(), error) {
 	}, nil
 }
 
-func (r *Registry) RegisterInstance(functionID string, proxyPort int, internalIP string) error {
+func (r *Registry) RegisterInstance(functionID, instanceID string, proxyPort int, internalIP string) error {
 	if r.leaseID == 0 {
 		return fmt.Errorf("worker not registered, no lease")
 	}
 
-	vmID := id.GenerateVMID()
 	info := protocol.FunctionInstance{
+		InstanceID: instanceID,
 		FunctionID: functionID,
 		WorkerID:   r.workerID,
 		HostIP:     r.workerIP,
@@ -108,19 +108,19 @@ func (r *Registry) RegisterInstance(functionID string, proxyPort int, internalIP
 	}
 
 	val, _ := json.Marshal(info)
-	key := protocol.InstanceKey(functionID, r.workerID, vmID)
+	key := protocol.InstanceKey(functionID, instanceID)
 
 	_, err := r.client.Put(context.Background(), key, string(val), etcd.WithLease(r.leaseID))
 	if err != nil {
 		return fmt.Errorf("failed to register function: %w", err)
 	}
 
-	logger.Info("function registered", "function", functionID, "key", key)
+	logger.Info("instance registered", "function", functionID, "instance", instanceID, "key", key)
 	return nil
 }
 
-func (r *Registry) UnregisterInstance(functionID, vmID string) error {
-	key := protocol.InstanceKey(functionID, r.workerID, vmID)
+func (r *Registry) UnregisterInstance(functionID, instanceID string) error {
+	key := protocol.InstanceKey(functionID, instanceID)
 	_, err := r.client.Delete(context.Background(), key)
 	if err != nil {
 		return fmt.Errorf("failed to unregister instance: %w", err)
