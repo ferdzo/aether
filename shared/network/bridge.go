@@ -18,6 +18,7 @@ type BridgeManager struct {
 	Subnet     *net.IPNet
 	mu         sync.Mutex
 	usedIPs    map[string]bool
+	nextTAPID  int
 }
 
 func runCmd(name string, args ...string) error {
@@ -142,13 +143,9 @@ func (bm *BridgeManager) NextTAPName() string {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
-	for i := 0; i < 256; i++ {
-		tapName := fmt.Sprintf("tap%d", i)
-		if _, err := runCmdOutput("ip", "link", "show", tapName); err != nil {
-			return tapName
-		}
-	}
-	return "tap0"
+	tapName := fmt.Sprintf("tap%d", bm.nextTAPID)
+	bm.nextTAPID++
+	return tapName
 }
 
 func (bm *BridgeManager) SetupNAT(externalInterface string) error {

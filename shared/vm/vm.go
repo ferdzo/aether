@@ -4,10 +4,24 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
+
+// generateMACFromIP creates a unique MAC address based on the VM's IP
+// Format: AA:FC:00:00:XX:YY where XX.YY are last two octets of IP in hex
+func generateMACFromIP(ip string) string {
+	parts := strings.Split(ip, ".")
+	if len(parts) != 4 {
+		return "AA:FC:00:00:00:01" // fallback
+	}
+	var oct2, oct3 int
+	fmt.Sscanf(parts[2], "%d", &oct2)
+	fmt.Sscanf(parts[3], "%d", &oct3)
+	return fmt.Sprintf("AA:FC:00:00:%02X:%02X", oct2, oct3)
+}
 
 type Config struct {
 	KernelPath    string
@@ -63,7 +77,7 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	// Kernel boot args
 	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
 	if cfg.VMIP != "" && cfg.GatewayIP != "" {
-		bootArgs = fmt.Sprintf("%s ip=%s::%s:255.255.255.0::eth0:off", bootArgs, cfg.VMIP, cfg.GatewayIP)
+		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ipv6.disable=1 init=/init ip=%s::%s:255.255.255.0::eth0:off", cfg.VMIP, cfg.GatewayIP)
 	}
 
 	drives := []models.Drive{
@@ -77,18 +91,13 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 
 	if cfg.CodeDrivePath != "" {
 		if _, err := os.Stat(cfg.CodeDrivePath); err == nil {
-			fmt.Printf("[VM] Adding code drive: %s\n", cfg.CodeDrivePath)
 			drives = append(drives, models.Drive{
 				DriveID:      firecracker.String("code"),
 				PathOnHost:   firecracker.String(cfg.CodeDrivePath),
 				IsRootDevice: firecracker.Bool(false),
 				IsReadOnly:   firecracker.Bool(true),
 			})
-		} else {
-			fmt.Printf("[VM] Code drive not found: %s (err: %v)\n", cfg.CodeDrivePath, err)
 		}
-	} else {
-		fmt.Println("[VM] No code drive path specified")
 	}
 
 	fcCfg := firecracker.Config{
@@ -103,11 +112,13 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	}
 
 	if cfg.TAPDeviceName != "" {
+		// Generate unique MAC from VM IP (last 2 octets)
+		mac := generateMACFromIP(cfg.VMIP)
 		fcCfg.NetworkInterfaces = []firecracker.NetworkInterface{
 			{
 				StaticConfiguration: &firecracker.StaticNetworkConfiguration{
 					HostDevName: cfg.TAPDeviceName,
-					MacAddress:  "AA:FC:00:00:00:01",
+					MacAddress:  mac,
 				},
 			},
 		}
@@ -118,6 +129,8 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		WithSocketPath(cfg.SocketPath).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
+		// WithStdout(io.Discard).
+		// WithStderr(io.Discard).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))

@@ -4,6 +4,9 @@
 # Binaries
 /agent
 /benchmark
+/gateway/gateway
+/worker/worker
+/hello
 
 # Rootfs and code images (large files)
 *.ext4
@@ -20,3 +23,5 @@ vm_key*
 .idea/
 .vscode/
 *.swp
+
+

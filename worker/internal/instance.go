@@ -6,6 +6,7 @@ import (
 	"aether/shared/network"
 	"aether/shared/vm"
 	"fmt"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -144,7 +145,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 func (i *Instance) WaitReady(port int, timeout time.Duration) error {
 	log := logger.With("function", i.FunctionID, "ip", i.vmIP, "port", port)
 	url := fmt.Sprintf("http://%s:%d/", i.vmIP, port)
-	client := &http.Client{Timeout: 1 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	deadline := time.Now().Add(timeout)
 
 	log.Debug("waiting for instance ready")
@@ -172,14 +173,20 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 	}
 
 	i.proxyPort = listenPort
+	
+	// Create listener first to ensure port is bound before returning
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", listenPort))
+	if err != nil {
+		return fmt.Errorf("failed to bind proxy port %d: %w", listenPort, err)
+	}
+
 	i.proxyServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", listenPort),
 		Handler: proxy,
 	}
 
 	go func() {
 		log.Info("proxy started", "listen_port", listenPort, "target", targetURL)
-		if err := i.proxyServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := i.proxyServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Error("proxy error", "error", err)
 		}
 	}()

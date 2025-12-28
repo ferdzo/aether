@@ -4,10 +4,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	"aether/shared/logger"
 )
 
 type Proxy struct {
-	proxy *httputil.ReverseProxy
+	proxy    *httputil.ReverseProxy
 	instance *Instance
 }
 
@@ -21,6 +23,7 @@ func NewProxy(targetURL string, instance *Instance) *Proxy {
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.instance.IncrementActiveRequests()
+	logger.Debug("proxy request", "instance", p.instance.ID, "active", p.instance.GetActiveRequests())
 	defer p.instance.DecrementActiveRequests()
 	p.proxy.ServeHTTP(w, r)
 }

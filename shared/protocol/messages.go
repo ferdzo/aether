@@ -9,6 +9,7 @@ type Job struct {
     ImageID    string `json:"image_id"`
     VCPU       int    `json:"vcpu"`
     MemoryMB   int    `json:"memory_mb"`
+    Count      int    `json:"count"`
 }
 
 // Stored in etcd: "/workers/<worker_id>"

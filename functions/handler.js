@@ -2,6 +2,9 @@ const http = require('http');
 
 // Your function logic
 const handler = async (event) => {
+  // Simulate work - 2 second delay for scaling tests
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
   return {
     statusCode: 200,
     body: {

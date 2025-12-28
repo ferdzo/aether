@@ -74,8 +74,8 @@ func main() {
 	scalingCfg := internal.ScalingConfig{
 		Enabled: true,
 		CheckInterval: 1 * time.Second,
-		ScaleUpThreshold: 5,
-		ScaleDownAfter: 30 * time.Second,
+		ScaleUpThreshold: 3,
+		ScaleDownAfter: 90 * time.Second,
 		MinInstances: 1,
 		MaxInstances: 10,
 	}
@@ -95,7 +95,6 @@ func main() {
 	if err := worker.Run(ctx); err != nil {
 		logger.Error("worker error", "error", err)
 	}
-		go scaler.Run(ctx)
 
 
 	worker.Shutdown()

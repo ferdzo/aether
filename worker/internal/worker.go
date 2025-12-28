@@ -83,7 +83,7 @@ func (w *Worker) handleJob(job []byte) error {
 	}
 
 	log := logger.With("request_id", jobData.RequestID, "function", jobData.FunctionID)
-	log.Info("received job")
+	log.Info("received job", "count", jobData.Count)
 
 	w.mu.Lock()
 	if _, exists := w.functionConfig[jobData.FunctionID]; !exists {
@@ -94,8 +94,25 @@ func (w *Worker) handleJob(job []byte) error {
 	}
 	w.mu.Unlock()
 
-	_, err := w.SpawnInstance(jobData.FunctionID)
-	return err
+	// Spawn multiple instances in parallel
+	count := jobData.Count
+	if count <= 0 {
+		count = 1
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := w.SpawnInstance(jobData.FunctionID); err != nil {
+				log.Error("failed to spawn instance", "error", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	return nil
 }
 
 func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
