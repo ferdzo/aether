@@ -49,7 +49,6 @@ func (s *Scaler) checkFunction(functionID string, instances []*Instance) {
 	}
 	avgConcurrency := float64(totalActive) / float64(len(instances))
 
-	// Debug: always log metrics
 	logger.Debug("scaler check", "function", functionID, "instances", len(instances), "total_active", totalActive, "avg", avgConcurrency, "threshold", s.cfg.ScaleUpThreshold)
 
 	// Scale up

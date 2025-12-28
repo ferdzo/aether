@@ -173,8 +173,7 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 	}
 
 	i.proxyPort = listenPort
-	
-	// Create listener first to ensure port is bound before returning
+
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", listenPort))
 	if err != nil {
 		return fmt.Errorf("failed to bind proxy port %d: %w", listenPort, err)

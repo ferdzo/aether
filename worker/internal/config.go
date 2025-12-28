@@ -10,11 +10,12 @@ type Config struct {
     FirecrackerBin string
     KernelPath     string
     RuntimePath    string
-    FunctionsDir   string
+    CodeCacheDir   string
     SocketDir      string
     BridgeName     string
     BridgeCIDR     string
     FunctionPort   int
+    MinioBucket    string
 }
 
 type ScalingConfig struct {

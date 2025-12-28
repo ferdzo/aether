@@ -10,8 +10,6 @@ import (
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 )
 
-// generateMACFromIP creates a unique MAC address based on the VM's IP
-// Format: AA:FC:00:00:XX:YY where XX.YY are last two octets of IP in hex
 func generateMACFromIP(ip string) string {
 	parts := strings.Split(ip, ".")
 	if len(parts) != 4 {
@@ -74,7 +72,6 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		os.Remove(cfg.SocketPath)
 	}
 
-	// Kernel boot args
 	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
 	if cfg.VMIP != "" && cfg.GatewayIP != "" {
 		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ipv6.disable=1 init=/init ip=%s::%s:255.255.255.0::eth0:off", cfg.VMIP, cfg.GatewayIP)
@@ -112,7 +109,6 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	}
 
 	if cfg.TAPDeviceName != "" {
-		// Generate unique MAC from VM IP (last 2 octets)
 		mac := generateMACFromIP(cfg.VMIP)
 		fcCfg.NetworkInterfaces = []firecracker.NetworkInterface{
 			{
@@ -129,8 +125,6 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		WithSocketPath(cfg.SocketPath).
 		WithStdout(os.Stdout).
 		WithStderr(os.Stderr).
-		// WithStdout(io.Discard).
-		// WithStderr(io.Discard).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))

@@ -45,7 +45,6 @@ func NewBridgeManager(bridgeName, cidr string) *BridgeManager {
 		_, subnet, _ = net.ParseCIDR("172.16.0.0/24")
 	}
 
-	// Gateway IP is network address + 1
 	gatewayIP := make(net.IP, len(subnet.IP))
 	copy(gatewayIP, subnet.IP)
 	gatewayIP = gatewayIP.To4()

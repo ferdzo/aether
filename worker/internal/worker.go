@@ -16,6 +16,7 @@ import (
 type FunctionConfig struct {
 	VCPU  int64
 	MemMB int64
+	Port  int
 }
 
 type Worker struct {
@@ -27,9 +28,10 @@ type Worker struct {
 	mu             sync.Mutex
 	nextPort       int
 	registry       *Registry
+	codeCache      *CodeCache
 }
 
-func NewWorker(cfg *Config, registry *Registry) *Worker {
+func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache) *Worker {
 	return &Worker{
 		cfg:            cfg,
 		vmMgr:          vm.NewManager(cfg.FirecrackerBin),
@@ -38,6 +40,7 @@ func NewWorker(cfg *Config, registry *Registry) *Worker {
 		functionConfig: make(map[string]FunctionConfig),
 		nextPort:       30000,
 		registry:       registry,
+		codeCache:      codeCache,
 	}
 }
 
@@ -87,14 +90,18 @@ func (w *Worker) handleJob(job []byte) error {
 
 	w.mu.Lock()
 	if _, exists := w.functionConfig[jobData.FunctionID]; !exists {
+		port := jobData.Port
+		if port == 0 {
+			port = 3000
+		}
 		w.functionConfig[jobData.FunctionID] = FunctionConfig{
 			VCPU:  int64(jobData.VCPU),
 			MemMB: int64(jobData.MemoryMB),
+			Port:  port,
 		}
 	}
 	w.mu.Unlock()
 
-	// Spawn multiple instances in parallel
 	count := jobData.Count
 	if count <= 0 {
 		count = 1
@@ -119,6 +126,11 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	instance := NewInstance(functionID, w.vmMgr, w.bridgeMgr)
 	log := logger.With("function", functionID, "instance", instance.ID)
 
+	codePath, err := w.codeCache.EnsureCode(functionID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get code: %w", err)
+	}
+
 	w.mu.Lock()
 	fnCfg := w.functionConfig[functionID]
 	w.mu.Unlock()
@@ -130,15 +142,19 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	if memMB == 0 {
 		memMB = 128
 	}
+	functionPort := fnCfg.Port
+	if functionPort == 0 {
+		functionPort = 3000
+	}
 
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
 		RuntimePath:  w.cfg.RuntimePath,
-		CodePath:     filepath.Join(w.cfg.FunctionsDir, functionID+".ext4"),
+		CodePath:     codePath,
 		SocketPath:   filepath.Join(w.cfg.SocketDir, instance.ID+".sock"),
 		VCPUCount:    vcpu,
 		MemSizeMB:    memMB,
-		FunctionPort: w.cfg.FunctionPort,
+		FunctionPort: functionPort,
 	}
 
 	if err := instance.Start(cfg); err != nil {
@@ -150,12 +166,12 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	w.nextPort++
 	w.mu.Unlock()
 
-	if err := instance.WaitReady(w.cfg.FunctionPort, 30*time.Second); err != nil {
+	if err := instance.WaitReady(functionPort, 30*time.Second); err != nil {
 		instance.Stop()
 		return nil, fmt.Errorf("instance not ready: %w", err)
 	}
 
-	if err := instance.StartProxy(proxyPort, w.cfg.FunctionPort); err != nil {
+	if err := instance.StartProxy(proxyPort, functionPort); err != nil {
 		instance.Stop()
 		return nil, fmt.Errorf("failed to start proxy: %w", err)
 	}

@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"aether/shared/db"
 	"aether/shared/id"
 	"aether/shared/logger"
 	"aether/shared/protocol"
@@ -17,13 +18,15 @@ import (
 type Handler struct {
 	discovery   *Discovery
 	redis       *RedisClient
+	db          *db.DB
 	coldStartSF singleflight.Group
 }
 
-func NewHandler(discovery *Discovery, redis *RedisClient) *Handler {
+func NewHandler(discovery *Discovery, redis *RedisClient, database *db.DB) *Handler {
 	return &Handler{
 		discovery: discovery,
 		redis:     redis,
+		db:        database,
 	}
 }
 
@@ -38,15 +41,28 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(instances) == 0 {
-		// Trigger cold start (spawns multiple instances)
-		_, err = h.coldStart(ctx, funcID)
+		fn, err := h.db.GetFunction(funcID)
 		if err != nil {
+			logger.Error("failed to get function", "function", funcID, "error", err)
+			http.Error(w, "failed to get function", http.StatusInternalServerError)
+			return
+		}
+		if fn == nil {
+			http.Error(w, "function not found", http.StatusNotFound)
+			return
+		}
+		if fn.CodePath == "" {
+			http.Error(w, "function code not uploaded", http.StatusBadRequest)
+			return
+		}
+
+		_, err = h.coldStart(ctx, fn)
+		if err != nil {
+			logger.Error("cold start failed", "function", funcID, "error", err)
 			http.Error(w, "failed to cold start function", http.StatusInternalServerError)
 			return
 		}
 
-		// Wait for more instances to register (give parallel spawns time to complete)
-		// Poll until we have at least 2 instances or timeout after 2s
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
 			instances, _ = h.discovery.GetInstances(ctx, funcID)
@@ -62,7 +78,6 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Pick random instance from available pool
 	instance := instances[rand.Intn(len(instances))]
 
 	logger.Debug("Routing request to instance", "instance", instance.InstanceID, "function", funcID, "pool_size", len(instances))
@@ -70,22 +85,23 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 	ProxyRequest(w, r, &instance)
 }
 
-const coldStartInstances = 3 // Spawn multiple instances on cold start to absorb burst
+const coldStartInstances = 1
 
-func (h *Handler) coldStart(ctx context.Context, funcID string) (protocol.FunctionInstance, error) {
-	result, err, _ := h.coldStartSF.Do(funcID, func() (interface{}, error) {
+func (h *Handler) coldStart(ctx context.Context, fn *protocol.FunctionMetadata) (protocol.FunctionInstance, error) {
+	result, err, _ := h.coldStartSF.Do(fn.ID, func() (interface{}, error) {
 		job := protocol.Job{
 			RequestID:  id.GenerateRequestID(),
-			FunctionID: funcID,
-			VCPU:       1,
-			MemoryMB:   128,
+			FunctionID: fn.ID,
+			VCPU:       fn.VCPU,
+			MemoryMB:   fn.MemoryMB,
+			Port:       fn.Port,
 			Count:      coldStartInstances,
 		}
 		if err := h.redis.PushJob(&job); err != nil {
 			return protocol.FunctionInstance{}, fmt.Errorf("failed to push job: %w", err)
 		}
 
-		instance, err := h.discovery.WaitForInstance(ctx, funcID, 30*time.Second)
+		instance, err := h.discovery.WaitForInstance(ctx, fn.ID, 30*time.Second)
 		if err != nil {
 			return protocol.FunctionInstance{}, fmt.Errorf("failed to wait for instance: %w", err)
 		}

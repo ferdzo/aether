@@ -19,6 +19,10 @@ func GenerateRequestID() string {
 	return "req-" + xid.New().String()
 }
 
+func GenerateFunctionID() string {
+	return "fn-" + xid.New().String()
+}
+
 func GetWorkerID() string {
 	if id := os.Getenv("AETHER_WORKER_ID"); id != "" {
 		return cleanID(id)

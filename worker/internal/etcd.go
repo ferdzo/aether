@@ -76,7 +76,6 @@ func (r *Registry) RegisterWorker() (func(), error) {
 
 	go func() {
 		for range keepAliveCh {
-			// Lease renewed
 		}
 		logger.Warn("keepalive channel closed, worker lease expired")
 	}()

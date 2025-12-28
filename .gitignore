@@ -25,3 +25,5 @@ vm_key*
 *.swp
 
 
+*.zip
+*.db

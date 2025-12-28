@@ -9,8 +9,11 @@ import (
 	"strings"
 	"syscall"
 
+	"aether/gateway/functions"
 	"aether/gateway/internal"
+	"aether/shared/db"
 	"aether/shared/logger"
+	"aether/shared/storage"
 	"log/slog"
 
 	"github.com/go-chi/chi/v5"
@@ -48,7 +51,6 @@ func main() {
 		}(),
 	}
 
-	// Cleints
 	etcdClient, err := internal.NewEtcdClient(config.EtcdEndpoints)
 	if err != nil{
 		logger.Error("Error creating etcd client", "error", err)
@@ -62,13 +64,38 @@ func main() {
 	}
 	defer redisClient.Close()
 
+	minioConfig := storage.MinioConfig{
+		Endpoint:  os.Getenv("MINIO_ENDPOINT"),
+		AccessKey: os.Getenv("MINIO_ACCESS_KEY"),
+		SecretKey: os.Getenv("MINIO_SECRET_KEY"),
+	}
+	minioClient, err := storage.NewMinio(minioConfig)
+	if err != nil {
+		logger.Error("Error creating minio client", "error", err)
+		os.Exit(1)
+	}
+	dbClient, err := db.NewDB(os.Getenv("DB_PATH"))
+	if err != nil {
+		logger.Error("Error creating db client", "error", err)
+		os.Exit(1)
+	}
+	defer dbClient.Close()
+
+	if err := dbClient.Migrate(); err != nil {
+		logger.Error("Error running migrations", "error", err)
+		os.Exit(1)
+	}
+
+	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient)
 	discovery := internal.NewDiscovery(etcdClient)
-	handler := internal.NewHandler(discovery, redisClient)
+	handler := internal.NewHandler(discovery, redisClient, dbClient)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.HandleFunc("/functions/{funcID}/*", handler.Handler)
+	r.Mount("/api/functions", functionsAPI.Routes())
+
 
 	go func() {
 		sig := make(chan os.Signal, 1)

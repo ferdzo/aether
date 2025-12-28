@@ -2,9 +2,9 @@ package main
 
 import (
 	"aether/shared/logger"
+	"aether/shared/storage"
 	"aether/worker/internal"
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -25,11 +25,12 @@ func readEnv() *internal.Config {
 		FirecrackerBin: os.Getenv("FIRECRACKER_BIN"),
 		KernelPath:     os.Getenv("KERNEL_PATH"),
 		RuntimePath:    os.Getenv("RUNTIME_PATH"),
-		FunctionsDir:   os.Getenv("FUNCTIONS_DIR"),
+		CodeCacheDir:   os.Getenv("CODE_CACHE_DIR"),
 		SocketDir:      os.Getenv("SOCKET_DIR"),
 		BridgeName:     os.Getenv("BRIDGE_NAME"),
 		BridgeCIDR:     os.Getenv("BRIDGE_CIDR"),
-		FunctionPort:   func() int {
+		MinioBucket:    os.Getenv("MINIO_BUCKET"),
+		FunctionPort: func() int {
 			val := os.Getenv("FUNCTION_PORT")
 			if val == "" {
 				val = "3000"
@@ -52,15 +53,12 @@ func main() {
 	}
 	config := readEnv()
 
-	fmt.Println("creating etcd client")
 	client, err := internal.NewEtcdClient(config.EtcdEndpoints)
 	if err != nil {
 		logger.Error("Error creating etcd client", "error", err)
 		os.Exit(1)
 	}
-	fmt.Println("creating registry")
 	registry := internal.NewRegistry(client, config.WorkerIP)
-	fmt.Println("registering worker")
 	unregister, err := registry.RegisterWorker()
 	if err != nil {
 		logger.Error("Error registering worker", "error", err)
@@ -69,8 +67,28 @@ func main() {
 	defer unregister()
 	defer registry.Close()
 
+	minioConfig := storage.MinioConfig{
+		Endpoint:  os.Getenv("MINIO_ENDPOINT"),
+		AccessKey: os.Getenv("MINIO_ACCESS_KEY"),
+		SecretKey: os.Getenv("MINIO_SECRET_KEY"),
+	}
 
-	worker := internal.NewWorker(config, registry)
+	minioClient, err := storage.NewMinio(minioConfig)
+	if err != nil {
+		logger.Error("Error creating minio client", "error", err)
+		os.Exit(1)
+	}
+
+	if config.MinioBucket == "" {
+		config.MinioBucket = "function-code"
+	}
+	if config.CodeCacheDir == "" {
+		config.CodeCacheDir = "/var/aether/cache"
+	}
+
+	codeCache := internal.NewCodeCache(minioClient, config.MinioBucket, config.CodeCacheDir)
+
+	worker := internal.NewWorker(config, registry, codeCache)
 	scalingCfg := internal.ScalingConfig{
 		Enabled: true,
 		CheckInterval: 1 * time.Second,
