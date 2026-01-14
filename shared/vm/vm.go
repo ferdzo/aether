@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -31,6 +32,8 @@ type Config struct {
 	TAPDeviceName string
 	VMIP          string
 	GatewayIP     string
+	BootToken     string
+	MMDSData      map[string]interface{}
 }
 
 type VM struct {
@@ -76,6 +79,9 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	if cfg.VMIP != "" && cfg.GatewayIP != "" {
 		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ipv6.disable=1 init=/init ip=%s::%s:255.255.255.0::eth0:off", cfg.VMIP, cfg.GatewayIP)
 	}
+	if cfg.BootToken != "" {
+		bootArgs = fmt.Sprintf("%s aether_token=%s", bootArgs, cfg.BootToken)
+	}
 
 	drives := []models.Drive{
 		{
@@ -108,16 +114,23 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		},
 	}
 
+	if cfg.MMDSData != nil {
+		fcCfg.MmdsVersion = firecracker.MMDSv1
+		fcCfg.MmdsAddress = net.ParseIP("169.254.169.254")
+	}
+
 	if cfg.TAPDeviceName != "" {
 		mac := generateMACFromIP(cfg.VMIP)
-		fcCfg.NetworkInterfaces = []firecracker.NetworkInterface{
-			{
-				StaticConfiguration: &firecracker.StaticNetworkConfiguration{
-					HostDevName: cfg.TAPDeviceName,
-					MacAddress:  mac,
-				},
+		networkInterface := firecracker.NetworkInterface{
+			StaticConfiguration: &firecracker.StaticNetworkConfiguration{
+				HostDevName: cfg.TAPDeviceName,
+				MacAddress:  mac,
 			},
 		}
+		if cfg.MMDSData != nil {
+			networkInterface.AllowMMDS = true
+		}
+		fcCfg.NetworkInterfaces = []firecracker.NetworkInterface{networkInterface}
 	}
 
 	cmd := firecracker.VMCommandBuilder{}.
@@ -136,6 +149,14 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	if err := machine.Start(ctx); err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to start machine: %w", err)
+	}
+
+	if cfg.MMDSData != nil {
+		if err := machine.SetMetadata(ctx, cfg.MMDSData); err != nil {
+			machine.StopVMM()
+			cancel()
+			return nil, fmt.Errorf("failed to set MMDS metadata: %w", err)
+		}
 	}
 
 	return &VM{

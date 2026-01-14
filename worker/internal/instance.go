@@ -50,6 +50,8 @@ type InstanceConfig struct {
 	VCPUCount    int64
 	MemSizeMB    int64
 	FunctionPort int
+	BootToken    string
+	MMDSData     map[string]interface{}
 }
 
 func (i *Instance) IncrementActiveRequests() {
@@ -123,6 +125,8 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		TAPDeviceName: tap.Name,
 		VMIP:          vmIP,
 		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
+		BootToken:     cfg.BootToken,
+		MMDSData:      cfg.MMDSData,
 	}
 
 	i.VCPU = cfg.VCPUCount
@@ -164,9 +168,11 @@ func (i *Instance) WaitReady(port int, timeout time.Duration) error {
 }
 
 func (i *Instance) StartProxy(listenPort int, targetPort int) error {
-	log := logger.With("function", i.FunctionID)
+	log := logger.With("function", i.FunctionID, "instance", i.ID)
 
 	targetURL := fmt.Sprintf("http://%s:%d", i.vmIP, targetPort)
+	log.Info("creating proxy", "listen_port", listenPort, "vm_ip", i.vmIP, "target_port", targetPort, "target_url", targetURL)
+	
 	proxy := NewProxy(targetURL, i)
 	if proxy == nil {
 		return fmt.Errorf("failed to create proxy for %s", targetURL)
@@ -184,7 +190,7 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 	}
 
 	go func() {
-		log.Info("proxy started", "listen_port", listenPort, "target", targetURL)
+		log.Info("proxy serving", "listen_port", listenPort)
 		if err := i.proxyServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Error("proxy error", "error", err)
 		}

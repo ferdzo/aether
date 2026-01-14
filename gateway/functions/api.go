@@ -1,6 +1,7 @@
 package functions
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"aether/shared/storage"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/redis/go-redis/v9"
 )
 
 const codeBucket = "function-code"
@@ -20,12 +22,14 @@ const codeBucket = "function-code"
 type FunctionsAPI struct {
 	db    *db.DB
 	minio *storage.Minio
+	redis *redis.Client
 }
 
-func NewFunctionsAPI(database *db.DB, minio *storage.Minio) *FunctionsAPI {
+func NewFunctionsAPI(database *db.DB, minio *storage.Minio, redisClient *redis.Client) *FunctionsAPI {
 	return &FunctionsAPI{
 		db:    database,
 		minio: minio,
+		redis: redisClient,
 	}
 }
 
@@ -242,12 +246,15 @@ func (api *FunctionsAPI) UploadCode(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // 5. Update function with code path
     fn.CodePath = objectPath
     if err := api.db.UpdateFunction(fn); err != nil {
         logger.Error("failed to update function", "error", err)
         http.Error(w, "failed to update function", http.StatusInternalServerError)
         return
+    }
+
+    if err := api.redis.Publish(context.Background(), protocol.ChannelCodeUpdate, fnID).Err(); err != nil {
+        logger.Warn("failed to publish code update event", "function", fnID, "error", err)
     }
 
     w.Header().Set("Content-Type", "application/json")

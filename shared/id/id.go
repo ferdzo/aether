@@ -44,3 +44,7 @@ func cleanID(s string) string {
 	s = strings.ReplaceAll(s, "_", "-")
 	return s
 }
+
+func GenerateToken() string {
+	return "tok-" + xid.New().String()
+}

@@ -43,3 +43,7 @@ func (r *RedisClient) PushJob(job *protocol.Job) error {
 	}
 	return r.client.LPush(context.Background(), protocol.QueueVMProvision, data).Err()
 }
+
+func (r *RedisClient) Client() *redis.Client {
+	return r.client
+}

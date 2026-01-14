@@ -19,10 +19,11 @@ type Config struct {
 }
 
 type ScalingConfig struct {
-    Enabled           bool
-    CheckInterval     time.Duration 
-    ScaleUpThreshold  int
-    ScaleDownAfter    time.Duration 
-    MinInstances      int
-    MaxInstances      int
+	Enabled          bool
+	CheckInterval    time.Duration
+	ScaleUpThreshold int
+	ScaleDownAfter   time.Duration
+	MinInstances     int
+	MaxInstances     int
+	ScaleToZeroAfter time.Duration
 }

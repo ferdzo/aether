@@ -2,14 +2,15 @@ const http = require('http');
 
 // Your function logic
 const handler = async (event) => {
-
-  
   return {
     statusCode: 200,
     body: {
-      message: 'Hello function! This is a test!',
+      message: process.env.GREETING || 'Hello from Aether!',
+      secret: process.env.MY_SECRET ? '***hidden***' : 'not set',
+      nodeEnv: process.env.NODE_ENV || 'development',
       timestamp: new Date().toISOString(),
-      input: event
+      input: event,
+      allEnv: Object.keys(process.env).filter(k => !k.startsWith('_'))
     }
   };
 };

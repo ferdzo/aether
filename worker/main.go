@@ -88,20 +88,28 @@ func main() {
 
 	codeCache := internal.NewCodeCache(minioClient, config.MinioBucket, config.CodeCacheDir)
 
-	worker := internal.NewWorker(config, registry, codeCache)
+	redisClient, err := internal.NewRedisClient(config.RedisAddr)
+	if err != nil {
+		logger.Error("Error creating redis client", "error", err)
+		os.Exit(1)
+	}
+	defer internal.CloseRedisClient(redisClient)
+
+	worker := internal.NewWorker(config, registry, codeCache, redisClient)
 	scalingCfg := internal.ScalingConfig{
-		Enabled: true,
-		CheckInterval: 1 * time.Second,
+		Enabled:          true,
+		CheckInterval:    1 * time.Second,
 		ScaleUpThreshold: 3,
-		ScaleDownAfter: 90 * time.Second,
-		MinInstances: 1,
-		MaxInstances: 10,
+		ScaleDownAfter:   30 * time.Second,
+		MinInstances:     1,
+		MaxInstances:     10,
+		ScaleToZeroAfter: 5 * time.Minute,
 	}
 	scaler := internal.NewScaler(worker, &scalingCfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	go func() {	
+	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
@@ -109,6 +117,7 @@ func main() {
 		cancel()
 	}()
 	go scaler.Run(ctx)
+	go worker.WatchCodeUpdates(ctx)
 
 	if err := worker.Run(ctx); err != nil {
 		logger.Error("worker error", "error", err)

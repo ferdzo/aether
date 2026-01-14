@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"aether/shared/id"
 	"aether/shared/logger"
 	"aether/shared/network"
 	"aether/shared/protocol"
@@ -11,12 +12,15 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	redis "github.com/redis/go-redis/v9"
 )
 
 type FunctionConfig struct {
-	VCPU  int64
-	MemMB int64
-	Port  int
+	VCPU    int64
+	MemMB   int64
+	Port    int
+	EnvVars map[string]string
 }
 
 type Worker struct {
@@ -29,9 +33,10 @@ type Worker struct {
 	nextPort       int
 	registry       *Registry
 	codeCache      *CodeCache
+	redis          *redis.Client
 }
 
-func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache) *Worker {
+func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClient *redis.Client) *Worker {
 	return &Worker{
 		cfg:            cfg,
 		vmMgr:          vm.NewManager(cfg.FirecrackerBin),
@@ -41,6 +46,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache) *Worker {
 		nextPort:       30000,
 		registry:       registry,
 		codeCache:      codeCache,
+		redis:          redisClient,
 	}
 }
 
@@ -89,16 +95,15 @@ func (w *Worker) handleJob(job []byte) error {
 	log.Info("received job", "count", jobData.Count)
 
 	w.mu.Lock()
-	if _, exists := w.functionConfig[jobData.FunctionID]; !exists {
-		port := jobData.Port
-		if port == 0 {
-			port = 3000
-		}
-		w.functionConfig[jobData.FunctionID] = FunctionConfig{
-			VCPU:  int64(jobData.VCPU),
-			MemMB: int64(jobData.MemoryMB),
-			Port:  port,
-		}
+	port := jobData.Port
+	if port == 0 {
+		port = 3000
+	}
+	w.functionConfig[jobData.FunctionID] = FunctionConfig{
+		VCPU:    int64(jobData.VCPU),
+		MemMB:   int64(jobData.MemoryMB),
+		Port:    port,
+		EnvVars: jobData.EnvVars,
 	}
 	w.mu.Unlock()
 
@@ -147,6 +152,12 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 		functionPort = 3000
 	}
 
+	bootToken := id.GenerateToken()
+	mmdsData := map[string]interface{}{
+		"token": bootToken,
+		"env":   fnCfg.EnvVars,
+	}
+
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
 		RuntimePath:  w.cfg.RuntimePath,
@@ -155,6 +166,8 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 		VCPUCount:    vcpu,
 		MemSizeMB:    memMB,
 		FunctionPort: functionPort,
+		BootToken:    bootToken,
+		MMDSData:     mmdsData,
 	}
 
 	if err := instance.Start(cfg); err != nil {
@@ -250,4 +263,45 @@ func (w *Worker) StopInstance(functionID, instanceID string) error {
 	}
 
 	return fmt.Errorf("instance %s not found", instanceID)
+}
+
+func (w *Worker) WatchCodeUpdates(ctx context.Context) {
+	pubsub := w.redis.Subscribe(ctx, protocol.ChannelCodeUpdate)
+	defer pubsub.Close()
+
+	logger.Info("watching for code updates", "channel", protocol.ChannelCodeUpdate)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-pubsub.Channel():
+			functionID := msg.Payload
+			logger.Info("code update received", "function", functionID)
+			w.handleCodeUpdate(functionID)
+		}
+	}
+}
+
+func (w *Worker) handleCodeUpdate(functionID string) {
+	if err := w.codeCache.Invalidate(functionID); err != nil {
+		logger.Error("failed to invalidate cache", "function", functionID, "error", err)
+	}
+
+	w.mu.Lock()
+	instances := w.instances[functionID]
+	w.mu.Unlock()
+
+	for _, inst := range instances {
+		logger.Info("stopping instance for code update", "function", functionID, "instance", inst.ID)
+		go func(id string) {
+			if err := w.StopInstance(functionID, id); err != nil {
+				logger.Error("failed to stop instance", "function", functionID, "instance", id, "error", err)
+			}
+		}(inst.ID)
+	}
+
+	w.mu.Lock()
+	delete(w.functionConfig, functionID)
+	w.mu.Unlock()
 }

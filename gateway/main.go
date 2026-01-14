@@ -86,7 +86,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient)
+	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client())
 	discovery := internal.NewDiscovery(etcdClient)
 	handler := internal.NewHandler(discovery, redisClient, dbClient)
 

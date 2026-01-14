@@ -3,13 +3,14 @@ package protocol
 import "time"
 
 type Job struct {
-	RequestID  string `json:"request_id"`
-	FunctionID string `json:"function_id"`
-	ImageID    string `json:"image_id"`
-	VCPU       int    `json:"vcpu"`
-	MemoryMB   int    `json:"memory_mb"`
-	Port       int    `json:"port"`
-	Count      int    `json:"count"`
+	RequestID  string            `json:"request_id"`
+	FunctionID string            `json:"function_id"`
+	ImageID    string            `json:"image_id"`
+	VCPU       int               `json:"vcpu"`
+	MemoryMB   int               `json:"memory_mb"`
+	Port       int               `json:"port"`
+	Count      int               `json:"count"`
+	EnvVars    map[string]string `json:"env_vars,omitempty"`
 }
 
 type WorkerNode struct {
@@ -34,9 +35,10 @@ type FunctionInstance struct {
 }
 
 const (
-	QueueVMProvision = "queue:vm_provision"
-	EtcdFuncPrefix   = "/functions/"
-	EtcdWorkerPrefix = "/workers/"
+	QueueVMProvision  = "queue:vm_provision"
+	ChannelCodeUpdate = "channel:code_update"
+	EtcdFuncPrefix    = "/functions/"
+	EtcdWorkerPrefix  = "/workers/"
 )
 
 func InstanceKey(functionID, instanceID string) string {

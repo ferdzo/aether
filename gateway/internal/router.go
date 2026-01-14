@@ -95,6 +95,7 @@ func (h *Handler) coldStart(ctx context.Context, fn *protocol.FunctionMetadata) 
 			VCPU:       fn.VCPU,
 			MemoryMB:   fn.MemoryMB,
 			Port:       fn.Port,
+			EnvVars:    fn.EnvVars,
 			Count:      coldStartInstances,
 		}
 		if err := h.redis.PushJob(&job); err != nil {
