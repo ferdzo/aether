@@ -86,15 +86,31 @@ Aether is a **proof-of-concept Function-as-a-Service (FaaS) platform** that runs
 - Boot token validation for security
 - Available in function as `process.env.VAR_NAME`
 
-## What Doesn't Work / Not Implemented ❌
+### Observability (OpenTelemetry)
+
+Traces and logs are collected via OpenTelemetry and visualized in Grafana.
+
+**Stack:**
+- **OTel Collector** (:4318) - Receives OTLP data from Gateway/Worker
+- **Tempo** (:3200) - Trace storage
+- **Loki** (:3100) - Log storage
+- **Grafana** (:3000) - Visualization
+
+**Traces emitted:**
+- Gateway: `function.invoke`, `function.coldstart`
+- Worker: `job.process`, `instance.spawn`
+
+**Logs emitted:**
+- All VM stdout/stderr with labels: `function.id`, `instance.id`, `stream`
+
+
+## What Doesn't Work / Not Implemented 
 
 | Feature | Status |
 |---------|--------|
-| **Invocation logging** | Table exists, nothing writes to it |
 | **Request timeouts** | No timeout on function calls |
 | **Health checks** | No periodic health monitoring of instances |
 | **Authentication** | No API auth |
-| **Metrics/observability** | No Prometheus endpoints |
 | **Multi-worker load balancing** | First worker to BLPOP gets all cold start jobs |
 
 ## Data Flow Diagram
@@ -138,7 +154,10 @@ User Request
 | `shared/storage/minio.go` | MinIO client |
 | `shared/builder/builder.go` | Code → ext4 image builder |
 | `shared/protocol/messages.go` | Shared data structures |
+| `shared/telemetry/telemetry.go` | OpenTelemetry setup + VM log capture |
 | `init/main.go` | aether-env binary source (MMDS fetcher) |
+| `deployment/compose.yml` | Docker Compose for infra (Redis, etcd, MinIO, Loki, Tempo, Grafana) |
+| `deployment/otel-collector.yaml` | OTel Collector config |
 
 ## Database Schema
 

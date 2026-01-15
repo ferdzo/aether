@@ -3,6 +3,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -34,6 +35,8 @@ type Config struct {
 	GatewayIP     string
 	BootToken     string
 	MMDSData      map[string]interface{}
+	Stdout        io.Writer
+	Stderr        io.Writer
 }
 
 type VM struct {
@@ -133,11 +136,20 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		fcCfg.NetworkInterfaces = []firecracker.NetworkInterface{networkInterface}
 	}
 
+	stdout := cfg.Stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := cfg.Stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(m.FirecrackerBin).
 		WithSocketPath(cfg.SocketPath).
-		WithStdout(os.Stdout).
-		WithStderr(os.Stderr).
+		WithStdout(stdout).
+		WithStderr(stderr).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))

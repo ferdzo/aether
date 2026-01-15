@@ -14,7 +14,27 @@ import (
 	"time"
 
 	redis "github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// MapCarrier implements propagation.TextMapCarrier for a map
+type MapCarrier map[string]string
+
+func (c MapCarrier) Get(key string) string        { return c[key] }
+func (c MapCarrier) Set(key, value string)        { c[key] = value }
+func (c MapCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func tracer() trace.Tracer {
+	return otel.Tracer("aether-worker")
+}
 
 type FunctionConfig struct {
 	VCPU    int64
@@ -91,6 +111,22 @@ func (w *Worker) handleJob(job []byte) error {
 		return fmt.Errorf("failed to unmarshal job: %w", err)
 	}
 
+	// Extract parent trace context from job (propagated from Gateway)
+	ctx := context.Background()
+	if jobData.TraceContext != nil {
+		carrier := MapCarrier(jobData.TraceContext)
+		ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
+	}
+
+	_, span := tracer().Start(ctx, "job.process")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("request.id", jobData.RequestID),
+		attribute.String("function.id", jobData.FunctionID),
+		attribute.Int("instance.count", jobData.Count),
+	)
+
 	log := logger.With("request_id", jobData.RequestID, "function", jobData.FunctionID)
 	log.Info("received job", "count", jobData.Count)
 
@@ -128,7 +164,14 @@ func (w *Worker) handleJob(job []byte) error {
 }
 
 func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
+	_, span := tracer().Start(context.Background(), "instance.spawn")
+	defer span.End()
+
 	instance := NewInstance(functionID, w.vmMgr, w.bridgeMgr)
+	span.SetAttributes(
+		attribute.String("function.id", functionID),
+		attribute.String("instance.id", instance.ID),
+	)
 	log := logger.With("function", functionID, "instance", instance.ID)
 
 	codePath, err := w.codeCache.EnsureCode(functionID)

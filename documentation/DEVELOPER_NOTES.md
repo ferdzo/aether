@@ -15,7 +15,8 @@ Internal documentation on implementation details and design decisions.
 7. [Code Building & Storage](#code-building--storage)
 8. [Auto-Scaling](#auto-scaling)
 9. [Service Discovery](#service-discovery)
-10. [Design Decisions](#design-decisions)
+10. [Telemetry & Observability](#telemetry--observability)
+11. [Design Decisions](#design-decisions)
 
 ---
 
@@ -63,8 +64,10 @@ aether/
 │   │   └── messages.go     # Shared structs: Job, FunctionInstance, etc.
 │   ├── id/
 │   │   └── id.go           # ID generators (fn-xxx, inst-xxx, etc.)
-│   └── logger/
-│       └── logger.go       # Structured logging (slog)
+│   ├── logger/
+│   │   └── logger.go       # Structured logging (slog)
+│   └── telemetry/
+│       └── telemetry.go    # OpenTelemetry setup + VM log capture
 │
 ├── init/                    # Runs INSIDE the VM
 │   ├── main.go             # aether-env binary source
@@ -1048,12 +1051,69 @@ sudo umount /mnt
 
 ---
 
+## Telemetry & Observability
+
+Aether uses OpenTelemetry to collect distributed traces and VM logs.
+
+### Infrastructure
+
+All observability services run via Docker Compose (`deployment/compose.yml`):
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| OTel Collector | 4318 | Receives OTLP from Gateway/Worker |
+| Tempo | 3200 | Trace storage |
+| Loki | 3100 | Log storage |
+| Grafana | 3000 | Visualization UI |
+
+### Traces
+
+Gateway and Worker emit spans for key operations:
+
+| Service | Span | When |
+|---------|------|------|
+| Gateway | `function.invoke` | Every function request |
+| Gateway | `function.coldstart` | When triggering cold start |
+| Worker | `job.process` | Processing cold start job |
+| Worker | `instance.spawn` | Spawning a VM |
+
+Spans include attributes like `function.id`, `instance.id`, `invocation.id`.
+
+### VM Log Capture
+
+The `VMLogWriter` in `shared/telemetry/telemetry.go` captures VM stdout/stderr:
+
+1. Worker creates `VMLogWriter` for each instance
+2. Passed to Firecracker as `Stdout`/`Stderr` writers
+3. Lines are parsed and sent to OTel as log records
+4. Labels: `function.id`, `instance.id`, `stream` (stdout/stderr)
+
+Logs still print to console for debugging.
+
+### Configuration
+
+Set in `.env` for both Gateway and Worker:
+
+```
+OTLP_ENDPOINT=localhost:4318
+```
+
+Omit or leave empty to disable telemetry.
+
+### Viewing in Grafana
+
+**Traces:** Explore → Tempo → Search by `service.name`
+
+**Logs:** Explore → Loki with queries like:
+- `{job="aether-worker"} | json | line_format "{{.body}}"`
+- Exclude kernel logs: `| body !~ "^\\[\\s+[0-9]+\\.[0-9]+\\].*"`
+
+---
+
 ## Future Improvements
 
-1. **Invocation Logging** - Log duration, status, errors
-2. **Request Timeouts** - Prevent hanging requests
-3. **Health Checks** - Periodic liveness probes
-4. **Multi-Worker Load Balancing** - Distribute cold starts evenly
-5. **Metrics** - Prometheus endpoint
-6. **Authentication** - API keys, JWT
-7. **Custom Runtimes** - Python, Go, Rust
+1. **Request Timeouts** - Prevent hanging requests
+2. **Health Checks** - Periodic liveness probes
+3. **Multi-Worker Load Balancing** - Distribute cold starts evenly
+4. **Authentication** - API keys, JWT
+5. **Custom Runtimes** - Python, Go, Rust

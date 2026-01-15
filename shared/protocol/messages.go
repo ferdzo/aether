@@ -3,14 +3,15 @@ package protocol
 import "time"
 
 type Job struct {
-	RequestID  string            `json:"request_id"`
-	FunctionID string            `json:"function_id"`
-	ImageID    string            `json:"image_id"`
-	VCPU       int               `json:"vcpu"`
-	MemoryMB   int               `json:"memory_mb"`
-	Port       int               `json:"port"`
-	Count      int               `json:"count"`
-	EnvVars    map[string]string `json:"env_vars,omitempty"`
+	RequestID    string            `json:"request_id"`
+	FunctionID   string            `json:"function_id"`
+	ImageID      string            `json:"image_id"`
+	VCPU         int               `json:"vcpu"`
+	MemoryMB     int               `json:"memory_mb"`
+	Port         int               `json:"port"`
+	Count        int               `json:"count"`
+	EnvVars      map[string]string `json:"env_vars,omitempty"`
+	TraceContext map[string]string `json:"trace_context,omitempty"` // For distributed tracing
 }
 
 type WorkerNode struct {

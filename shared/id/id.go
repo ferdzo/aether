@@ -48,3 +48,7 @@ func cleanID(s string) string {
 func GenerateToken() string {
 	return "tok-" + xid.New().String()
 }
+
+func GenerateInvocationID() string {
+	return "inv-" + xid.New().String()
+}

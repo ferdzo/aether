@@ -1,3 +1,7 @@
+networks:
+  aether:
+    driver: bridge
+
 services:
 
   redis:
@@ -7,6 +11,8 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
+    networks:
+      - aether
 
   etcd:
     image: quay.io/coreos/etcd:v3.6.7
@@ -18,6 +24,8 @@ services:
       - ALLOW_NONE_AUTHENTICATION=yes
       - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+    networks:
+      - aether
 
   minio:
     image: minio/minio:latest
@@ -30,8 +38,66 @@ services:
     environment:
       - MINIO_ROOT_USER=aether
       - MINIO_ROOT_PASSWORD=Aether123
+    networks:
+      - aether
+
+  loki:
+    image: grafana/loki:2.9.0
+    ports:
+      - 3100:3100
+    volumes:
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - aether
+
+  tempo:
+    image: grafana/tempo:2.3.0
+    ports:
+      - 3200:3200
+    volumes:
+      - tempo_data:/tmp/tempo
+      - ./tempo.yaml:/etc/tempo.yaml
+    command: ["-config.file=/etc/tempo.yaml"]
+    networks:
+      - aether
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    ports:
+      - 4317:4317
+      - 4318:4318
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml
+    command: ["--config", "/etc/otelcol-contrib/config.yaml"]
+    depends_on:
+      - loki
+      - tempo
+    networks:
+      - aether
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    depends_on:
+      - loki
+      - tempo
+    networks:
+      - aether
 
 volumes:
   redis_data:
   etcd_data:
   minio_data:
+  loki_data:
+  tempo_data:
+  grafana_data:

@@ -3,6 +3,7 @@ package main
 import (
 	"aether/shared/logger"
 	"aether/shared/storage"
+	"aether/shared/telemetry"
 	"aether/worker/internal"
 	"context"
 	"log/slog"
@@ -51,6 +52,18 @@ func main() {
 	if err != nil {
 		logger.Error("Error loading .env file", "error", err)
 	}
+
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName:  "aether-worker",
+		OTLPEndpoint: os.Getenv("OTLP_ENDPOINT"),
+		Enabled:      os.Getenv("OTLP_ENDPOINT") != "",
+	})
+	if err != nil {
+		logger.Warn("telemetry init failed", "error", err)
+	} else {
+		defer shutdownTelemetry(context.Background())
+	}
+
 	config := readEnv()
 
 	client, err := internal.NewEtcdClient(config.EtcdEndpoints)

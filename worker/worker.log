@@ -1,0 +1,618 @@
+time=2026-01-15T14:14:49.595+01:00 level=INFO msg="Starting Worker"
+time=2026-01-15T14:14:49.596+01:00 level=INFO msg="telemetry config" endpoint=localhost:4318 enabled=true
+time=2026-01-15T14:14:49.596+01:00 level=INFO msg="telemetry initialized successfully"
+time=2026-01-15T14:14:49.608+01:00 level=INFO msg="worker registered" worker_id=worker-2ddfed6eb840 lease_id=7587892203291193559
+time=2026-01-15T14:14:49.609+01:00 level=INFO msg="connected to redis" addr=localhost:6379
+time=2026-01-15T14:14:49.610+01:00 level=INFO msg="watching for code updates" channel=channel:code_update
+time=2026-01-15T14:14:49.613+01:00 level=INFO msg="connected to redis" addr=localhost:6379
+time=2026-01-15T14:14:49.613+01:00 level=INFO msg="watching queue" queue=queue:vm_provision
+time=2026-01-15T14:14:57.826+01:00 level=INFO msg="span created" span_id=907de82f05be5fa0 trace_id=4d92895e8bd98c091f182e0c7b954626 is_recording=true
+time=2026-01-15T14:14:57.826+01:00 level=INFO msg="received job" request_id=req-d5kegkf6m57c2o4t0tjg function=fn-d5k1h0f6m57fckddr4kg count=1
+time=2026-01-15T14:14:57.826+01:00 level=DEBUG msg="code cache hit (disk)" function=fn-d5k1h0f6m57fckddr4kg
+time=2026-01-15T14:14:57.826+01:00 level=DEBUG msg="allocated IP" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg ip=172.16.0.2
+time=2026-01-15T14:14:57.834+01:00 level=DEBUG msg="created TAP" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg tap=tap0
+time=2026-01-15T14:14:57.836+01:00 level=DEBUG msg="launching VM" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg vcpu=1 memory_mb=128 code_path=/var/aether/cache/fn-d5k1h0f6m57fckddr4kg.ext4
+time="2026-01-15T14:14:57+01:00" level=info msg="Called startVMM(), setting up a VMM on /tmp/firecracker/inst-d5kegkf6m579bgc48m50.sock"
+2026-01-15T14:14:57.838630418 [anonymous-instance:main] Running Firecracker v1.12.1
+2026-01-15T14:14:57.844296642 [anonymous-instance:main] Listening on API socket ("/tmp/firecracker/inst-d5kegkf6m579bgc48m50.sock").
+2026-01-15T14:14:57.844660788 [anonymous-instance:fc_api] API server started.
+2026-01-15T14:14:57.847862878 [anonymous-instance:fc_api] The API server received a Get request on "/machine-config".
+time="2026-01-15T14:14:57+01:00" level=info msg="VMM logging disabled."
+time="2026-01-15T14:14:57+01:00" level=info msg="VMM metrics disabled."
+2026-01-15T14:14:57.847884318 [anonymous-instance:fc_api] The request was executed successfully. Status code: 200 OK.
+2026-01-15T14:14:57.848054724 [anonymous-instance:fc_api] The API server received a Put request on "/machine-config" with body "{\"mem_size_mib\":128,\"vcpu_count\":1}\n".
+2026-01-15T14:14:57.848104856 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.848152687 [anonymous-instance:fc_api] The API server received a Get request on "/machine-config".
+time="2026-01-15T14:14:57+01:00" level=info msg="refreshMachineConfiguration: [GET /machine-config][200] getMachineConfigurationOK  &{CPUTemplate: MemSizeMib:0xc0003de188 Smt:0xc0003de2e0 TrackDirtyPages:false VcpuCount:0xc0003de180}"
+time="2026-01-15T14:14:57+01:00" level=info msg="PutGuestBootSource: [PUT /boot-source][204] putGuestBootSourceNoContent "
+time="2026-01-15T14:14:57+01:00" level=info msg="Attaching drive /home/ferdzo/projects/aether/node-rootfs.ext4, slot rootfs, root true."
+time="2026-01-15T14:14:57+01:00" level=info msg="Attached drive /home/ferdzo/projects/aether/node-rootfs.ext4: [PUT /drives/{drive_id}][204] putGuestDriveByIdNoContent "
+time="2026-01-15T14:14:57+01:00" level=info msg="Attaching drive /var/aether/cache/fn-d5k1h0f6m57fckddr4kg.ext4, slot code, root false."
+time="2026-01-15T14:14:57+01:00" level=info msg="Attached drive /var/aether/cache/fn-d5k1h0f6m57fckddr4kg.ext4: [PUT /drives/{drive_id}][204] putGuestDriveByIdNoContent "
+time="2026-01-15T14:14:57+01:00" level=info msg="Attaching NIC tap0 (hwaddr AA:FC:00:00:00:02) at index 1"
+2026-01-15T14:14:57.848173354 [anonymous-instance:fc_api] The request was executed successfully. Status code: 200 OK.
+2026-01-15T14:14:57.848408342 [anonymous-instance:fc_api] The API server received a Put request on "/boot-source" with body "{\"boot_args\":\"panic=1 pci=off ipv6.disable=1 init=/init ip=172.16.0.2::172.16.0.1:255.255.255.0::eth0:off aether_token=tok-d5kegkf6m579bgc48m5g console=ttyS0 reboot=k\",\"kernel_image_path\":\"/home/ferdzo/projects/firecracker_testing/vmlinux-6.1.128\"}\n".
+2026-01-15T14:14:57.848457853 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.848583641 [anonymous-instance:fc_api] The API server received a Put request on "/drives/rootfs" with body "{\"drive_id\":\"rootfs\",\"is_read_only\":false,\"is_root_device\":true,\"path_on_host\":\"/home/ferdzo/projects/aether/node-rootfs.ext4\"}\n".
+2026-01-15T14:14:57.848643659 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.848777920 [anonymous-instance:fc_api] The API server received a Put request on "/drives/code" with body "{\"drive_id\":\"code\",\"is_read_only\":true,\"is_root_device\":false,\"path_on_host\":\"/var/aether/cache/fn-d5k1h0f6m57fckddr4kg.ext4\"}\n".
+2026-01-15T14:14:57.848894611 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.849044737 [anonymous-instance:fc_api] The API server received a Put request on "/network-interfaces/1" with body "{\"guest_mac\":\"AA:FC:00:00:00:02\",\"host_dev_name\":\"tap0\",\"iface_id\":\"1\"}\n".
+2026-01-15T14:14:57.849691002 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.849824075 [anonymous-instance:fc_api] The API server received a Put request on "/mmds/config" with body "{\"ipv4_address\":\"169.254.169.254\",\"network_interfaces\":[\"1\"],\"version\":\"V1\"}\n".
+2026-01-15T14:14:57.849885869 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.849892229 [anonymous-instance:fc_api] PUT /mmds/config: V1 is deprecated. Use V2 instead.
+2026-01-15T14:14:57.850023612 [anonymous-instance:fc_api] The API server received a Put request on "/actions" with body "{\"action_type\":\"InstanceStart\"}\n".
+2026-01-15T14:14:57.869084981 [anonymous-instance:main] Artificially kick devices.
+time="2026-01-15T14:14:57+01:00" level=info msg="startInstance successful: [PUT /actions][204] createSyncActionNoContent "
+time="2026-01-15T14:14:57+01:00" level=info msg="SetMetadata successful"
+time=2026-01-15T14:14:57.869+01:00 level=INFO msg="VM launched" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg ip=172.16.0.2 tap=tap0
+time=2026-01-15T14:14:57.869+01:00 level=DEBUG msg="waiting for instance ready" function=fn-d5k1h0f6m57fckddr4kg ip=172.16.0.2 port=3000
+2026-01-15T14:14:57.869141900 [anonymous-instance:fc_vcpu 0] Received a VcpuEvent::Resume message with immediate_exit enabled. immediate_exit was disabled before proceeding
+2026-01-15T14:14:57.869179740 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+2026-01-15T14:14:57.869395647 [anonymous-instance:fc_api] The API server received a Put request on "/mmds".
+2026-01-15T14:14:57.869429607 [anonymous-instance:fc_api] The request was executed successfully. Status code: 204 No Content.
+[    0.000000] Linux version 6.1.128 (root@bd3f41838d3f) (gcc (Ubuntu 11.4.0-1ubuntu1~22.04) 11.4.0, GNU ld (GNU Binutils for Ubuntu) 2.38) #1 SMP PREEMPT_DYNAMIC Mon Mar 10 14:07:44 UTC 2025
+[    0.000000] Command line: panic=1 pci=off ipv6.disable=1 init=/init ip=172.16.0.2::172.16.0.1:255.255.255.0::eth0:off aether_token=tok-d5kegkf6m579bgc48m5g console=ttyS0 reboot=k root=/dev/vda rw virtio_mmio.device=4K@0xd0000000:5 virtio_mmio.device=4K@0xd0001000:6 virtio_mmio.device=4K@0xd0002000:7
+[    0.000000] KASLR disabled
+[    0.000000] x86/split lock detection: #DB: warning on user-space bus_locks
+[    0.000000] BIOS-provided physical RAM map:
+[    0.000000] BIOS-e820: [mem 0x0000000000000000-0x000000000009fbff] usable
+[    0.000000] BIOS-e820: [mem 0x000000000009fc00-0x00000000000fffff] reserved
+[    0.000000] BIOS-e820: [mem 0x0000000000100000-0x0000000007ffffff] usable
+[    0.000000] NX (Execute Disable) protection: active
+[    0.000000] DMI not present or invalid.
+[    0.000000] Hypervisor detected: KVM
+[    0.000000] kvm-clock: Using msrs 4b564d01 and 4b564d00
+[    0.000001] kvm-clock: using sched offset of 23361982 cycles
+[    0.000005] clocksource: kvm-clock: mask: 0xffffffffffffffff max_cycles: 0x1cd42e4dffb, max_idle_ns: 881590591483 ns
+[    0.000011] tsc: Detected 2995.200 MHz processor
+[    0.000076] last_pfn = 0x8000 max_arch_pfn = 0x400000000
+[    0.000104] Disabled
+[    0.000105] x86/PAT: MTRRs disabled, skipping PAT initialization too.
+[    0.000117] CPU MTRRs all blank - virtualized system.
+[    0.000122] x86/PAT: Configuration [0-7]: WB  WT  UC- UC  WB  WT  UC- UC  
+[    0.000141] Using GB pages for direct mapping
+[    0.000198] ACPI: Early table checksum verification disabled
+[    0.000219] ACPI: RSDP 0x00000000000E0000 000024 (v02 FIRECK)
+[    0.000225] ACPI: XSDT 0x00000000000A0177 000034 (v01 FIRECK FCMVXSDT 00000000 FCAT 20240119)
+[    0.000234] ACPI: FACP 0x00000000000A0023 000114 (v06 FIRECK FCVMFADT 00000000 FCAT 20240119)
+[    0.000240] ACPI: DSDT 0x000000000009FD30 0002F3 (v02 FIRECK FCVMDSDT 00000000 FCAT 20240119)
+[    0.000242] ACPI: APIC 0x00000000000A0137 000040 (v06 FIRECK FCVMMADT 00000000 FCAT 20240119)
+[    0.000244] ACPI: Reserving FACP table memory at [mem 0xa0023-0xa0136]
+[    0.000245] ACPI: Reserving DSDT table memory at [mem 0x9fd30-0xa0022]
+[    0.000246] ACPI: Reserving APIC table memory at [mem 0xa0137-0xa0176]
+[    0.000294] No NUMA configuration found
+[    0.000294] Faking a node at [mem 0x0000000000000000-0x0000000007ffffff]
+[    0.000297] NODE_DATA(0) allocated [mem 0x07fde000-0x07ffffff]
+[    0.000391] Zone ranges:
+[    0.000394]   DMA      [mem 0x0000000000001000-0x0000000000ffffff]
+[    0.000395]   DMA32    [mem 0x0000000001000000-0x0000000007ffffff]
+[    0.000396]   Normal   empty
+[    0.000396] Movable zone start for each node
+[    0.000397] Early memory node ranges
+[    0.000397]   node   0: [mem 0x0000000000001000-0x000000000009efff]
+[    0.000398]   node   0: [mem 0x0000000000100000-0x0000000007ffffff]
+[    0.000401] Initmem setup node 0 [mem 0x0000000000001000-0x0000000007ffffff]
+[    0.000409] On node 0, zone DMA: 1 pages in unavailable ranges
+[    0.000513] On node 0, zone DMA: 97 pages in unavailable ranges
+[    0.001386] IOAPIC[0]: apic_id 0, version 17, address 0xfec00000, GSI 0-23
+[    0.001392] ACPI: Using ACPI (MADT) for SMP configuration information
+[    0.001393] TSC deadline timer available
+[    0.001394] smpboot: Allowing 1 CPUs, 0 hotplug CPUs
+[    0.001427] PM: hibernation: Registered nosave memory: [mem 0x00000000-0x00000fff]
+[    0.001429] PM: hibernation: Registered nosave memory: [mem 0x0009f000-0x0009ffff]
+[    0.001430] PM: hibernation: Registered nosave memory: [mem 0x000a0000-0x000fffff]
+[    0.001430] [mem 0x08000000-0xffffffff] available for PCI devices
+[    0.001431] Booting paravirtualized kernel on KVM
+[    0.001434] clocksource: refined-jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645519600211568 ns
+[    0.001438] setup_percpu: NR_CPUS:64 nr_cpumask_bits:1 nr_cpu_ids:1 nr_node_ids:1
+[    0.002510] percpu: Embedded 44 pages/cpu s147880 r0 d32344 u2097152
+[    0.002538] kvm-guest: PV spinlocks disabled, single CPU
+[    0.002542] Fallback order for Node 0: 0 
+[    0.002545] Built 1 zonelists, mobility grouping on.  Total pages: 32000
+[    0.002546] Policy zone: DMA32
+[    0.002547] Kernel command line: panic=1 pci=off ipv6.disable=1 init=/init ip=172.16.0.2::172.16.0.1:255.255.255.0::eth0:off aether_token=tok-d5kegkf6m579bgc48m5g console=ttyS0 reboot=k root=/dev/vda rw virtio_mmio.device=4K@0xd0000000:5 virtio_mmio.device=4K@0xd0001000:6 virtio_mmio.device=4K@0xd0002000:7
+[    0.002674] Unknown kernel command line parameters "aether_token=tok-d5kegkf6m579bgc48m5g", will be passed to user space.
+[    0.002691] random: crng init done
+[    0.002751] Dentry cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[    0.002789] Inode-cache hash table entries: 8192 (order: 4, 65536 bytes, linear)
+[    0.002817] mem auto-init: stack:off, heap alloc:off, heap free:off
+[    0.003152] Memory: 102568K/130680K available (12289K kernel code, 1079K rwdata, 2136K rodata, 2596K init, 2336K bss, 27856K reserved, 0K cma-reserved)
+[    0.003247] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1
+[    0.003715] Dynamic Preempt: none
+[    0.003746] rcu: Preemptible hierarchical RCU implementation.
+[    0.003749] rcu: 	RCU restricting CPUs from NR_CPUS=64 to nr_cpu_ids=1.
+[    0.003750] 	Trampoline variant of Tasks RCU enabled.
+[    0.003751] 	Tracing variant of Tasks RCU enabled.
+[    0.003754] rcu: RCU calculated value of scheduler-enlistment delay is 25 jiffies.
+[    0.003755] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=1
+[    0.003765] NR_IRQS: 4352, nr_irqs: 32, preallocated irqs: 0
+[    0.003795] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[    0.003864] Console: colour dummy device 80x25
+[    0.032001] printk: console [ttyS0] enabled
+[    0.032257] ACPI: Core revision 20220331
+[    0.032515] APIC: Switch to symmetric I/O mode setup
+[    0.032918] x2apic enabled
+[    0.033196] Switched APIC routing to physical x2apic.
+[    0.033497] clocksource: tsc-early: mask: 0xffffffffffffffff max_cycles: 0x2b2c8ec87c7, max_idle_ns: 440795278598 ns
+[    0.034084] Calibrating delay loop (skipped) preset value.. 5990.40 BogoMIPS (lpj=11980800)
+[    0.034629] x86/cpu: User Mode Instruction Prevention (UMIP) activated
+[    0.034999] Last level iTLB entries: 4KB 0, 2MB 0, 4MB 0
+[    0.035288] Last level dTLB entries: 4KB 0, 2MB 0, 4MB 0, 1GB 0
+[    0.035612] Spectre V1 : Mitigation: usercopy/swapgs barriers and __user pointer sanitization
+[    0.036104] Spectre V2 : Mitigation: Enhanced / Automatic IBRS
+[    0.036401] Spectre V2 : Spectre v2 / SpectreRSB mitigation: Filling RSB on context switch
+[    0.036825] Spectre V2 : mitigation: Enabling conditional Indirect Branch Prediction Barrier
+[    0.037248] Speculative Store Bypass: Mitigation: Speculative Store Bypass disabled via prctl
+[    0.037688] x86/fpu: Supporting XSAVE feature 0x001: 'x87 floating point registers'
+[    0.038080] x86/fpu: Supporting XSAVE feature 0x002: 'SSE registers'
+[    0.038080] x86/fpu: Supporting XSAVE feature 0x004: 'AVX registers'
+[    0.038080] x86/fpu: Supporting XSAVE feature 0x200: 'Protection Keys User registers'
+[    0.038080] x86/fpu: xstate_offset[2]:  576, xstate_sizes[2]:  256
+[    0.038080] x86/fpu: xstate_offset[9]:  832, xstate_sizes[9]:    8
+[    0.038080] x86/fpu: Enabled xstate features 0x207, context size is 840 bytes, using 'compacted' format.
+[    0.038080] Freeing SMP alternatives memory: 40K
+[    0.038080] pid_max: default: 32768 minimum: 301
+[    0.038080] LSM: Security Framework initializing
+[    0.038080] SELinux:  Initializing.
+[    0.038080] SELinux: CONFIG_SECURITY_SELINUX_CHECKREQPROT_VALUE is non-zero.  This is deprecated and will be rejected in a future kernel release.
+[    0.038080] SELinux: https://github.com/SELinuxProject/selinux-kernel/wiki/DEPRECATE-checkreqprot
+[    0.038080] Mount-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
+[    0.038080] Mountpoint-cache hash table entries: 512 (order: 0, 4096 bytes, linear)
+[    0.038080] smpboot: CPU0: Intel(R) Xeon(R) Processor (family: 0x6, model: 0xaa, stepping: 0x4)
+[    0.038080] cblist_init_generic: Setting adjustable number of callback queues.
+[    0.038080] cblist_init_generic: Setting shift to 0 and lim to 1.
+[    0.038080] cblist_init_generic: Setting adjustable number of callback queues.
+[    0.038080] cblist_init_generic: Setting shift to 0 and lim to 1.
+[    0.038080] Performance Events: unsupported p6 CPU model 170 no PMU driver, software events only.
+[    0.038080] signal: max sigframe size: 3632
+[    0.038080] rcu: Hierarchical SRCU implementation.
+[    0.038080] rcu: 	Max phase no-delay instances is 1000.
+[    0.038080] NMI watchdog: Perf NMI watchdog permanently disabled
+[    0.038080] smp: Bringing up secondary CPUs ...
+[    0.038084] smp: Brought up 1 node, 1 CPU
+[    0.038293] smpboot: Max logical packages: 1
+[    0.038513] smpboot: Total of 1 processors activated (5990.40 BogoMIPS)
+[    0.038972] devtmpfs: initialized
+[    0.039183] x86/mm: Memory block size: 128MB
+[    0.039517] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 7645041785100000 ns
+[    0.040025] futex hash table entries: 256 (order: 2, 16384 bytes, linear)
+[    0.040503] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[    0.040855] audit: initializing netlink subsys (disabled)
+[    0.041195] thermal_sys: Registered thermal governor 'fair_share'
+[    0.041196] thermal_sys: Registered thermal governor 'step_wise'
+[    0.041524] thermal_sys: Registered thermal governor 'user_space'
+[    0.041873] cpuidle: using governor ladder
+[    0.042306] cpuidle: using governor menu
+[    0.043114] audit: type=2000 audit(1768482897.881:1): state=initialized audit_enabled=0 res=1
+[    0.043633] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[    0.043985] HugeTLB: 16380 KiB vmemmap can be freed for a 1.00 GiB page
+[    0.044327] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[    0.044678] HugeTLB: 28 KiB vmemmap can be freed for a 2.00 MiB page
+[    0.045273] ACPI: Added _OSI(Module Device)
+[    0.045506] ACPI: Added _OSI(Processor Device)
+[    0.045753] ACPI: Added _OSI(3.0 _SCP Extensions)
+[    0.046015] ACPI: Added _OSI(Processor Aggregator Device)
+[    0.046133] ACPI: 1 ACPI AML tables successfully acquired and loaded
+[    0.046536] ACPI: Interpreter enabled
+[    0.046742] ACPI: PM: (supports S0)
+[    0.046930] ACPI: Using IOAPIC for interrupt routing
+[    0.047501] iommu: Default domain type: Translated 
+[    0.047772] iommu: DMA domain TLB invalidation policy: lazy mode 
+[    0.048143] SCSI subsystem initialized
+[    0.048360] pps_core: LinuxPPS API ver. 1 registered
+[    0.048635] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[    0.049122] PTP clock support registered
+[    0.049431] NetLabel: Initializing
+[    0.049632] NetLabel:  domain hash size = 128
+[    0.049872] NetLabel:  protocols = UNLABELED CIPSOv4 CALIPSO
+[    0.050100] NetLabel:  unlabeled traffic allowed by default
+[    0.050481] clocksource: Switched to clocksource kvm-clock
+[    0.050888] VFS: Disk quotas dquot_6.6.0
+[    0.051116] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[    0.051525] pnp: PnP ACPI init
+[    0.051776] pnp: PnP ACPI: found 5 devices
+[    0.052586] NET: Registered PF_INET protocol family
+[    0.052876] IP idents hash table entries: 2048 (order: 2, 16384 bytes, linear)
+[    0.053332] tcp_listen_portaddr_hash hash table entries: 256 (order: 0, 4096 bytes, linear)
+[    0.053787] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[    0.053832] TCP established hash table entries: 1024 (order: 1, 8192 bytes, linear)
+[    0.054264] TCP bind hash table entries: 1024 (order: 3, 32768 bytes, linear)
+[    0.054668] TCP: Hash tables configured (established 1024 bind 1024)
+[    0.055070] MPTCP token hash table entries: 256 (order: 0, 6144 bytes, linear)
+[    0.055469] UDP hash table entries: 256 (order: 1, 8192 bytes, linear)
+[    0.055828] UDP-Lite hash table entries: 256 (order: 1, 8192 bytes, linear)
+[    0.056236] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[    0.056680] RPC: Registered named UNIX socket transport module.
+[    0.056989] RPC: Registered udp transport module.
+[    0.057245] RPC: Registered tcp transport module.
+[    0.057497] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[    0.057866] NET: Registered PF_XDP protocol family
+[    0.058185] clocksource: tsc: mask: 0xffffffffffffffff max_cycles: 0x2b2c8ec87c7, max_idle_ns: 440795278598 ns
+[    0.058785] clocksource: Switched to clocksource tsc
+[    0.059083] platform rtc_cmos: registered platform RTC device (no PNP device found)
+[    0.059698] Initialise system trusted keyrings
+[    0.059945] Key type blacklist registered
+[    0.060569] workingset: timestamp_bits=36 max_order=15 bucket_order=0
+[    0.061581] zbud: loaded
+[    0.061915] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[    0.062418] NFS: Registering the id_resolver key type
+[    0.062700] Key type id_resolver registered
+[    0.062926] Key type id_legacy registered
+[    0.063162] nfs4filelayout_init: NFSv4 File Layout Driver Registering...
+[    0.063559] SGI XFS with ACLs, security attributes, quota, no debug enabled
+[    0.072152] Key type asymmetric registered
+[    0.072374] Asymmetric key parser 'x509' registered
+[    0.072647] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 251)
+[    0.073092] io scheduler mq-deadline registered
+[    0.073334] io scheduler kyber registered
+[    0.073561] io scheduler bfq registered
+[    0.074601] Serial: 8250/16550 driver, 1 ports, IRQ sharing disabled
+[    0.075012] 00:00: ttyS0 at I/O 0x3f8 (irq = 28, base_baud = 115200) is a 16550A
+[    0.078684] loop: module loaded
+[    0.078919] virtio_blk virtio0: 1/0/0 default/read/poll queues
+[    0.079390] virtio_blk virtio0: [vda] 524288 512-byte logical blocks (268 MB/256 MiB)
+[    0.080341] virtio_blk virtio1: 1/0/0 default/read/poll queues
+[    0.080797] virtio_blk virtio1: [vdb] 4096 512-byte logical blocks (2.10 MB/2.00 MiB)
+[    0.081716] Loading iSCSI transport class v2.0-870.
+[    0.082147] iscsi: registered transport (tcp)
+[    0.082752] i8042: PNP: PS/2 Controller [PNP0303:PS2] at 0x60,0x64 irq 30
+[    0.083227] i8042: PNP: PS/2 appears to have AUX port disabled, if this is incorrect please boot with i8042.nopnp
+[    0.083979] serio: i8042 KBD port at 0x60,0x64 irq 30
+[    0.084680] intel_pstate: CPU model not supported
+[    0.085070] hid: raw HID events driver (C) Jiri Kosina
+[    0.085519] Initializing XFRM netlink socket
+[    0.085829] IPv6: Loaded, but administratively disabled, reboot required to enable
+[    0.087661] bpfilter: Loaded bpfilter_umh pid 151
+[    0.088166] NET: Registered PF_PACKET protocol family
+[    0.088537] Bridge firewalling registered
+[    0.088837] Key type dns_resolver registered
+[    0.089153] NET: Registered PF_VSOCK protocol family
+[    0.089528] IPI shorthand broadcast: enabled
+[    0.089863] sched_clock: Marking stable (56094988, 30278963)->(108175021, -21801070)
+[    0.090550] registered taskstats version 1
+[    0.090960] Loading compiled-in X.509 certificates
+[    0.091396] zswap: loaded using pool lzo/zbud
+[    0.091759] Key type .fscrypt registered
+[    0.092038] Key type fscrypt-provisioning registered
+[    0.092428] Key type encrypted registered
+[    0.610482] input: AT Raw Set 2 keyboard as /devices/platform/i8042/serio0/input/input0
+[    0.630319] IP-Config: Complete:
+[    0.630569]      device=eth0, hwaddr=aa:fc:00:00:00:02, ipaddr=172.16.0.2, mask=255.255.255.0, gw=172.16.0.1
+[    0.631129]      host=172.16.0.2, domain=, nis-domain=(none)
+[    0.631427]      bootserver=255.255.255.255, rootserver=255.255.255.255, rootpath=
+[    0.631490] clk: Disabling unused clocks
+[    0.636233] EXT4-fs (vda): recovery complete
+[    0.636491] EXT4-fs (vda): mounted filesystem with ordered data mode. Quota mode: none.
+[    0.636806] VFS: Mounted root (ext4 filesystem) on device 254:0.
+[    0.637803] devtmpfs: mounted
+[    0.638390] Freeing unused kernel image (initmem) memory: 2596K
+[    0.638637] Write protecting the kernel read-only data: 18432k
+[    0.639655] Freeing unused kernel image (text/rodata gap) memory: 2044K
+[    0.640973] Freeing unused kernel image (rodata/data gap) memory: 1960K
+[    0.641213] Run /init as init process
+[    0.653846] /dev/vdb: Can't open blockdev
+[    0.654275] /dev/vdb: Can't open blockdev
+[    0.655069] /dev/vdb: Can't open blockdev
+[    0.656633] EXT4-fs (vdb): write access unavailable, skipping orphan cleanup
+[    0.656846] EXT4-fs (vdb): mounted filesystem with ordered data mode. Quota mode: none.
+Code drive mounted
+Function ready on port 3000
+time=2026-01-15T14:14:58.672+01:00 level=INFO msg="instance ready" function=fn-d5k1h0f6m57fckddr4kg ip=172.16.0.2 port=3000
+time=2026-01-15T14:14:58.672+01:00 level=INFO msg="creating proxy" function=fn-d5k1h0f6m57fckddr4kg instance=inst-d5kegkf6m579bgc48m50 listen_port=30000 vm_ip=172.16.0.2 target_port=3000 target_url=http://172.16.0.2:3000
+time=2026-01-15T14:14:58.672+01:00 level=INFO msg="instance started" function=fn-d5k1h0f6m57fckddr4kg instance=inst-d5kegkf6m579bgc48m50 vm_ip=172.16.0.2 proxy_port=30000
+time=2026-01-15T14:14:58.672+01:00 level=INFO msg="proxy serving" function=fn-d5k1h0f6m57fckddr4kg instance=inst-d5kegkf6m579bgc48m50 listen_port=30000
+time=2026-01-15T14:14:58.680+01:00 level=INFO msg="instance registered" function=fn-d5k1h0f6m57fckddr4kg instance=inst-d5kegkf6m579bgc48m50 key=/functions/fn-d5k1h0f6m57fckddr4kg/instances/inst-d5kegkf6m579bgc48m50
+time=2026-01-15T14:14:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1.783743579s
+time=2026-01-15T14:15:00.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2.78361891s
+time=2026-01-15T14:15:00.707+01:00 level=DEBUG msg="proxy request" instance=inst-d5kegkf6m579bgc48m50 vm_ip=172.16.0.2 proxy_port=30000 active=1 path=/functions/fn-d5k1h0f6m57fckddr4kg/
+time=2026-01-15T14:15:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=902.833659ms
+time=2026-01-15T14:15:02.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1.902823098s
+time=2026-01-15T14:15:03.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2.902594153s
+time=2026-01-15T14:15:04.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3.902825146s
+time=2026-01-15T14:15:05.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4.902840349s
+time=2026-01-15T14:15:06.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=5.902276941s
+time=2026-01-15T14:15:07.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=6.902637336s
+time=2026-01-15T14:15:08.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=7.902827889s
+time=2026-01-15T14:15:09.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=8.902338622s
+time=2026-01-15T14:15:10.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=9.902364032s
+time=2026-01-15T14:15:11.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=10.902335833s
+time=2026-01-15T14:15:12.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=11.902749505s
+time=2026-01-15T14:15:13.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=12.9025133s
+time=2026-01-15T14:15:14.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=13.902470835s
+time=2026-01-15T14:15:15.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=14.902815061s
+time=2026-01-15T14:15:16.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=15.902477743s
+time=2026-01-15T14:15:17.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=16.902586656s
+time=2026-01-15T14:15:18.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=17.902617957s
+time=2026-01-15T14:15:19.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=18.902346063s
+time=2026-01-15T14:15:20.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=19.902834782s
+time=2026-01-15T14:15:21.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=20.902704802s
+time=2026-01-15T14:15:22.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=21.903320698s
+time=2026-01-15T14:15:23.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=22.902471088s
+time=2026-01-15T14:15:24.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=23.902833735s
+time=2026-01-15T14:15:25.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=24.902748742s
+time=2026-01-15T14:15:26.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=25.902526747s
+time=2026-01-15T14:15:27.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=26.902815963s
+time=2026-01-15T14:15:28.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=27.903324277s
+time=2026-01-15T14:15:29.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=28.902320384s
+time=2026-01-15T14:15:30.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=29.902720712s
+time=2026-01-15T14:15:31.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=30.902864275s
+time=2026-01-15T14:15:32.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=31.902392375s
+time=2026-01-15T14:15:33.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=32.902826207s
+time=2026-01-15T14:15:34.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=33.902619763s
+time=2026-01-15T14:15:35.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=34.902685503s
+time=2026-01-15T14:15:36.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=35.902836164s
+time=2026-01-15T14:15:37.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=36.902324486s
+time=2026-01-15T14:15:38.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=37.902819779s
+time=2026-01-15T14:15:39.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=38.902617438s
+time=2026-01-15T14:15:40.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=39.902829495s
+time=2026-01-15T14:15:41.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=40.902503078s
+time=2026-01-15T14:15:42.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=41.902822241s
+time=2026-01-15T14:15:43.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=42.90282961s
+time=2026-01-15T14:15:44.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=43.902469551s
+time=2026-01-15T14:15:45.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=44.902829649s
+time=2026-01-15T14:15:46.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=45.902759042s
+time=2026-01-15T14:15:47.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=46.902833276s
+time=2026-01-15T14:15:48.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=47.902480862s
+time=2026-01-15T14:15:49.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=48.902337017s
+time=2026-01-15T14:15:50.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=49.902834983s
+time=2026-01-15T14:15:51.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=50.902633392s
+time=2026-01-15T14:15:52.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=51.902296693s
+time=2026-01-15T14:15:53.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=52.902829582s
+time=2026-01-15T14:15:54.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=53.902487144s
+time=2026-01-15T14:15:55.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=54.903280787s
+time=2026-01-15T14:15:56.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=55.902662299s
+time=2026-01-15T14:15:57.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=56.902351116s
+time=2026-01-15T14:15:58.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=57.902293655s
+time=2026-01-15T14:15:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=58.902869772s
+time=2026-01-15T14:16:00.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=59.902816882s
+time=2026-01-15T14:16:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m0.90249052s
+time=2026-01-15T14:16:02.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m1.902581006s
+time=2026-01-15T14:16:03.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m2.902845231s
+time=2026-01-15T14:16:04.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m3.902827861s
+time=2026-01-15T14:16:05.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m4.903324663s
+time=2026-01-15T14:16:06.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m5.902461616s
+time=2026-01-15T14:16:07.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m6.903272729s
+time=2026-01-15T14:16:08.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m7.902682703s
+time=2026-01-15T14:16:09.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m8.902850613s
+time=2026-01-15T14:16:10.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m9.902689171s
+time=2026-01-15T14:16:11.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m10.903326589s
+time=2026-01-15T14:16:12.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m11.902656562s
+time=2026-01-15T14:16:13.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m12.90326497s
+time=2026-01-15T14:16:14.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m13.902486882s
+time=2026-01-15T14:16:15.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m14.903304333s
+time=2026-01-15T14:16:16.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m15.903307467s
+time=2026-01-15T14:16:17.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m16.902874415s
+time=2026-01-15T14:16:18.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m17.903246307s
+time=2026-01-15T14:16:19.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m18.902848646s
+time=2026-01-15T14:16:20.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m19.903334345s
+time=2026-01-15T14:16:21.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m20.902842264s
+time=2026-01-15T14:16:22.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m21.90276141s
+time=2026-01-15T14:16:23.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m22.902473675s
+time=2026-01-15T14:16:24.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m23.902843975s
+time=2026-01-15T14:16:25.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m24.903223889s
+time=2026-01-15T14:16:26.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m25.902488233s
+time=2026-01-15T14:16:27.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m26.902830872s
+time=2026-01-15T14:16:28.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m27.902975355s
+time=2026-01-15T14:16:29.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m28.902839175s
+time=2026-01-15T14:16:30.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m29.902816489s
+time=2026-01-15T14:16:31.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m30.902837575s
+time=2026-01-15T14:16:32.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m31.902817416s
+time=2026-01-15T14:16:33.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m32.902840008s
+time=2026-01-15T14:16:34.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m33.902395566s
+time=2026-01-15T14:16:35.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m34.902482729s
+time=2026-01-15T14:16:36.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m35.902832105s
+time=2026-01-15T14:16:37.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m36.902611119s
+time=2026-01-15T14:16:38.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m37.903324212s
+time=2026-01-15T14:16:39.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m38.90295064s
+time=2026-01-15T14:16:40.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m39.90330563s
+time=2026-01-15T14:16:41.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m40.902291693s
+time=2026-01-15T14:16:42.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m41.902389172s
+time=2026-01-15T14:16:43.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m42.903287708s
+time=2026-01-15T14:16:44.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m43.90330753s
+time=2026-01-15T14:16:45.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m44.902829665s
+time=2026-01-15T14:16:46.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m45.903265217s
+time=2026-01-15T14:16:47.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m46.902819373s
+time=2026-01-15T14:16:48.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m47.903255187s
+time=2026-01-15T14:16:49.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m48.9023213s
+time=2026-01-15T14:16:50.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m49.903236992s
+time=2026-01-15T14:16:51.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m50.902849358s
+time=2026-01-15T14:16:52.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m51.90319251s
+time=2026-01-15T14:16:53.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m52.902834779s
+time=2026-01-15T14:16:54.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m53.90274813s
+time=2026-01-15T14:16:55.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m54.902822376s
+time=2026-01-15T14:16:56.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m55.902845406s
+time=2026-01-15T14:16:57.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m56.903279469s
+time=2026-01-15T14:16:58.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m57.902348701s
+time=2026-01-15T14:16:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m58.902839948s
+time=2026-01-15T14:17:00.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=1m59.903172148s
+time=2026-01-15T14:17:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m0.902868964s
+time=2026-01-15T14:17:02.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m1.902401406s
+time=2026-01-15T14:17:03.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m2.902474359s
+time=2026-01-15T14:17:04.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m3.903195123s
+time=2026-01-15T14:17:05.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m4.902830852s
+time=2026-01-15T14:17:06.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m5.903104434s
+time=2026-01-15T14:17:07.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m6.902276859s
+time=2026-01-15T14:17:08.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m7.903232158s
+time=2026-01-15T14:17:09.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m8.902767499s
+time=2026-01-15T14:17:10.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m9.902388153s
+time=2026-01-15T14:17:11.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m10.90255244s
+time=2026-01-15T14:17:12.611+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m11.903674845s
+time=2026-01-15T14:17:13.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m12.903036147s
+time=2026-01-15T14:17:14.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m13.902837711s
+time=2026-01-15T14:17:15.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m14.902821508s
+time=2026-01-15T14:17:16.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m15.902517685s
+time=2026-01-15T14:17:17.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m16.902813075s
+time=2026-01-15T14:17:18.611+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m17.903532095s
+time=2026-01-15T14:17:19.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m18.90264045s
+time=2026-01-15T14:17:20.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m19.902600451s
+time=2026-01-15T14:17:21.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m20.902814032s
+time=2026-01-15T14:17:22.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m21.903238295s
+time=2026-01-15T14:17:23.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m22.903289127s
+time=2026-01-15T14:17:24.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m23.902546289s
+time=2026-01-15T14:17:25.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m24.902821663s
+time=2026-01-15T14:17:26.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m25.902717524s
+time=2026-01-15T14:17:27.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m26.902447904s
+time=2026-01-15T14:17:28.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m27.902811417s
+time=2026-01-15T14:17:29.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m28.902431205s
+time=2026-01-15T14:17:30.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m29.902805577s
+time=2026-01-15T14:17:31.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m30.902698515s
+time=2026-01-15T14:17:32.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m31.90272102s
+time=2026-01-15T14:17:33.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m32.903225751s
+time=2026-01-15T14:17:34.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m33.90266345s
+time=2026-01-15T14:17:35.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m34.902322494s
+time=2026-01-15T14:17:36.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m35.903198312s
+time=2026-01-15T14:17:37.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m36.902328349s
+time=2026-01-15T14:17:38.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m37.902912616s
+time=2026-01-15T14:17:39.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m38.90313196s
+time=2026-01-15T14:17:40.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m39.902749039s
+time=2026-01-15T14:17:41.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m40.902652414s
+time=2026-01-15T14:17:42.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m41.903089796s
+time=2026-01-15T14:17:43.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m42.902369077s
+time=2026-01-15T14:17:44.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m43.903199648s
+time=2026-01-15T14:17:45.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m44.902821093s
+time=2026-01-15T14:17:46.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m45.902336193s
+time=2026-01-15T14:17:47.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m46.903184251s
+time=2026-01-15T14:17:48.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m47.903019335s
+time=2026-01-15T14:17:49.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m48.903185693s
+time=2026-01-15T14:17:50.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m49.902816101s
+time=2026-01-15T14:17:51.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m50.903175819s
+time=2026-01-15T14:17:52.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m51.902303723s
+time=2026-01-15T14:17:53.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m52.902461528s
+time=2026-01-15T14:17:54.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m53.902386756s
+time=2026-01-15T14:17:55.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m54.902870032s
+time=2026-01-15T14:17:56.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m55.902710686s
+time=2026-01-15T14:17:57.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m56.902502683s
+time=2026-01-15T14:17:58.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m57.903176642s
+time=2026-01-15T14:17:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m58.902822631s
+time=2026-01-15T14:18:00.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=2m59.902289617s
+time=2026-01-15T14:18:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m0.902813653s
+time=2026-01-15T14:18:02.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m1.903150766s
+time=2026-01-15T14:18:03.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m2.902658987s
+time=2026-01-15T14:18:04.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m3.903165639s
+time=2026-01-15T14:18:05.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m4.902822565s
+time=2026-01-15T14:18:06.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m5.902338367s
+time=2026-01-15T14:18:07.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m6.902774338s
+time=2026-01-15T14:18:08.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m7.90294252s
+time=2026-01-15T14:18:09.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m8.902996414s
+time=2026-01-15T14:18:10.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m9.903209352s
+time=2026-01-15T14:18:11.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m10.902348487s
+time=2026-01-15T14:18:12.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m11.903109699s
+time=2026-01-15T14:18:13.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m12.902336697s
+time=2026-01-15T14:18:14.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m13.90235613s
+time=2026-01-15T14:18:15.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m14.903138109s
+time=2026-01-15T14:18:16.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m15.902838305s
+time=2026-01-15T14:18:17.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m16.902816047s
+time=2026-01-15T14:18:18.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m17.903189927s
+time=2026-01-15T14:18:19.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m18.902633636s
+time=2026-01-15T14:18:20.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m19.902926636s
+time=2026-01-15T14:18:21.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m20.902935707s
+time=2026-01-15T14:18:22.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m21.903106647s
+time=2026-01-15T14:18:23.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m22.902690114s
+time=2026-01-15T14:18:24.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m23.902610701s
+time=2026-01-15T14:18:25.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m24.902833298s
+time=2026-01-15T14:18:26.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m25.90315195s
+time=2026-01-15T14:18:27.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m26.902749625s
+time=2026-01-15T14:18:28.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m27.903136207s
+time=2026-01-15T14:18:29.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m28.902719198s
+time=2026-01-15T14:18:30.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m29.902829465s
+time=2026-01-15T14:18:31.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m30.902337706s
+time=2026-01-15T14:18:32.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m31.903274868s
+time=2026-01-15T14:18:33.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m32.902403331s
+time=2026-01-15T14:18:34.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m33.902747123s
+time=2026-01-15T14:18:35.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m34.902823091s
+time=2026-01-15T14:18:36.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m35.903112636s
+time=2026-01-15T14:18:37.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m36.902685041s
+time=2026-01-15T14:18:38.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m37.902295945s
+time=2026-01-15T14:18:39.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m38.903139971s
+time=2026-01-15T14:18:40.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m39.902987753s
+time=2026-01-15T14:18:41.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m40.903141237s
+time=2026-01-15T14:18:42.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m41.903219187s
+time=2026-01-15T14:18:43.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m42.903142047s
+time=2026-01-15T14:18:44.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m43.902988201s
+time=2026-01-15T14:18:45.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m44.902998414s
+time=2026-01-15T14:18:46.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m45.903119218s
+time=2026-01-15T14:18:47.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m46.903326756s
+time=2026-01-15T14:18:48.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m47.903218356s
+time=2026-01-15T14:18:49.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m48.902442395s
+time=2026-01-15T14:18:50.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m49.903111624s
+time=2026-01-15T14:18:51.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m50.902870164s
+time=2026-01-15T14:18:52.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m51.902870398s
+time=2026-01-15T14:18:53.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m52.902866819s
+time=2026-01-15T14:18:54.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m53.902434115s
+time=2026-01-15T14:18:55.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m54.902757565s
+time=2026-01-15T14:18:56.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m55.903071529s
+time=2026-01-15T14:18:57.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m56.902545127s
+time=2026-01-15T14:18:58.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m57.902761858s
+time=2026-01-15T14:18:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m58.903030111s
+time=2026-01-15T14:19:00.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=3m59.903124978s
+time=2026-01-15T14:19:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m0.902466065s
+time=2026-01-15T14:19:02.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m1.902504222s
+time=2026-01-15T14:19:03.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m2.902871139s
+time=2026-01-15T14:19:04.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m3.902924025s
+time=2026-01-15T14:19:05.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m4.9024235s
+time=2026-01-15T14:19:06.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m5.90287728s
+time=2026-01-15T14:19:07.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m6.902567572s
+time=2026-01-15T14:19:08.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m7.903090449s
+time=2026-01-15T14:19:09.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m8.903224409s
+time=2026-01-15T14:19:10.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m9.902805157s
+time=2026-01-15T14:19:11.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m10.9031556s
+time=2026-01-15T14:19:12.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m11.903260028s
+time=2026-01-15T14:19:13.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m12.902766768s
+time=2026-01-15T14:19:14.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m13.903143264s
+time=2026-01-15T14:19:15.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m14.90243875s
+time=2026-01-15T14:19:16.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m15.903260133s
+time=2026-01-15T14:19:17.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m16.902838526s
+time=2026-01-15T14:19:18.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m17.902829853s
+time=2026-01-15T14:19:19.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m18.902591519s
+time=2026-01-15T14:19:20.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m19.902695603s
+time=2026-01-15T14:19:21.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m20.90281811s
+time=2026-01-15T14:19:22.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m21.903178216s
+time=2026-01-15T14:19:23.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m22.903065504s
+time=2026-01-15T14:19:24.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m23.902738358s
+time=2026-01-15T14:19:25.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m24.903068218s
+time=2026-01-15T14:19:26.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m25.902996652s
+time=2026-01-15T14:19:27.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m26.903282273s
+time=2026-01-15T14:19:28.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m27.903264356s
+time=2026-01-15T14:19:29.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m28.903250867s
+time=2026-01-15T14:19:30.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m29.903261421s
+time=2026-01-15T14:19:31.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m30.902297703s
+time=2026-01-15T14:19:32.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m31.902942132s
+time=2026-01-15T14:19:33.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m32.903000172s
+time=2026-01-15T14:19:34.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m33.902827584s
+time=2026-01-15T14:19:35.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m34.902866949s
+time=2026-01-15T14:19:36.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m35.902550435s
+time=2026-01-15T14:19:37.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m36.903152718s
+time=2026-01-15T14:19:38.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m37.903245662s
+time=2026-01-15T14:19:39.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m38.902628025s
+time=2026-01-15T14:19:40.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m39.903097458s
+time=2026-01-15T14:19:41.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m40.90318174s
+time=2026-01-15T14:19:42.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m41.902583949s
+time=2026-01-15T14:19:43.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m42.902380576s
+time=2026-01-15T14:19:44.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m43.903175202s
+time=2026-01-15T14:19:45.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m44.903076385s
+time=2026-01-15T14:19:46.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m45.902680607s
+time=2026-01-15T14:19:47.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m46.902335149s
+time=2026-01-15T14:19:48.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m47.903047989s
+time=2026-01-15T14:19:49.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m48.903041177s
+time=2026-01-15T14:19:50.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m49.90320403s
+time=2026-01-15T14:19:51.609+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m50.902343099s
+time=2026-01-15T14:19:52.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m51.902743357s
+time=2026-01-15T14:19:53.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m52.902749765s
+time=2026-01-15T14:19:54.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m53.903330603s
+time=2026-01-15T14:19:55.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m54.902826307s
+time=2026-01-15T14:19:56.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m55.902741766s
+time=2026-01-15T14:19:57.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m56.903144861s
+time=2026-01-15T14:19:58.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m57.903275331s
+time=2026-01-15T14:19:59.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m58.903111244s
+time=2026-01-15T14:20:00.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=4m59.903078058s
+time=2026-01-15T14:20:01.610+01:00 level=DEBUG msg="scaler check" function=fn-d5k1h0f6m57fckddr4kg instances=1 total_active=0 avg=0 min_idle=5m0.90281608s
+time=2026-01-15T14:20:01.610+01:00 level=INFO msg="scaling to zero" function=fn-d5k1h0f6m57fckddr4kg instances=1 idle_for=5m0.90281608s
+time=2026-01-15T14:20:01.610+01:00 level=DEBUG msg="stopping proxy" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg
+time=2026-01-15T14:20:01.610+01:00 level=DEBUG msg="stopping VM" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg
+time=2026-01-15T14:20:01.610+01:00 level=DEBUG msg="deleting TAP" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg tap=tap0
+time=2026-01-15T14:20:01.630+01:00 level=DEBUG msg="releasing IP" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg ip=172.16.0.2
+time=2026-01-15T14:20:01.632+01:00 level=INFO msg="instance stopped" instance=inst-d5kegkf6m579bgc48m50 function=fn-d5k1h0f6m57fckddr4kg
+time=2026-01-15T14:20:01.637+01:00 level=INFO msg="instance unregistered" function=fn-d5k1h0f6m57fckddr4kg
+time="2026-01-15T14:20:01+01:00" level=warning msg="firecracker exited: signal: terminated"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,11 +15,13 @@ import (
 	"aether/shared/db"
 	"aether/shared/logger"
 	"aether/shared/storage"
+	"aether/shared/telemetry"
 	"log/slog"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/joho/godotenv"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 type Config struct {
 	EtcdEndpoints []string
@@ -27,13 +30,23 @@ type Config struct {
 }
 
 func main() {
-
 	logger.Init(slog.LevelDebug, true)
 
 	err := godotenv.Load()
 	if err != nil {
 		logger.Error("Error loading .env file", "error", err)
 		os.Exit(1)
+	}
+
+	shutdownTelemetry, err := telemetry.Init(context.Background(), telemetry.Config{
+		ServiceName:  "aether-gateway",
+		OTLPEndpoint: os.Getenv("OTLP_ENDPOINT"),
+		Enabled:      os.Getenv("OTLP_ENDPOINT") != "",
+	})
+	if err != nil {
+		logger.Warn("telemetry init failed", "error", err)
+	} else {
+		defer shutdownTelemetry(context.Background())
 	}
 	config := Config{
 		EtcdEndpoints: strings.Split(os.Getenv("ETCD_ENDPOINTS"), ","),
@@ -107,7 +120,8 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", config.Port)
 	logger.Info("Gateway starting", "addr", addr)
-	if err := http.ListenAndServe(addr, r); err != nil {
+	otelHandler := otelhttp.NewHandler(r, "aether-gateway")
+	if err := http.ListenAndServe(addr, otelHandler); err != nil {
 		logger.Error("Server error", "error", err)
 		os.Exit(1)
 	}

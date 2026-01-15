@@ -4,13 +4,18 @@ import (
 	"aether/shared/id"
 	"aether/shared/logger"
 	"aether/shared/network"
+	"aether/shared/telemetry"
 	"aether/shared/vm"
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type InstanceStatus string
@@ -40,6 +45,9 @@ type Instance struct {
 	proxyPort       int
 	proxyServer     *http.Server
 	mu              sync.Mutex
+	stdoutWriter    *telemetry.VMLogWriter
+	stderrWriter    *telemetry.VMLogWriter
+	span            trace.Span
 }
 
 type InstanceConfig struct {
@@ -79,19 +87,32 @@ func (i* Instance) IdleDuration() time.Duration{
 }
 
 func NewInstance(functionID string, vmMgr *vm.Manager, bridgeMgr *network.BridgeManager) *Instance {
+	instID := id.GenerateInstanceID()
 	return &Instance{
-		ID:         id.GenerateInstanceID(),
-		FunctionID: functionID,
-		Status:     StatusStarting,
-		StartedAt:  time.Now(),
-		vmMgr:      vmMgr,
-		bridgeMgr:  bridgeMgr,
+		ID:           instID,
+		FunctionID:   functionID,
+		Status:       StatusStarting,
+		StartedAt:    time.Now(),
+		vmMgr:        vmMgr,
+		bridgeMgr:    bridgeMgr,
+		stdoutWriter: telemetry.NewVMLogWriter(functionID, instID, false),
+		stderrWriter: telemetry.NewVMLogWriter(functionID, instID, true),
 	}
 }
 
 func (i *Instance) Start(cfg InstanceConfig) error {
 	log := logger.With("instance", i.ID, "function", i.FunctionID)
 	i.Status = StatusStarting
+
+	_, span := telemetry.Tracer("aether-worker").Start(context.Background(), "instance.lifecycle",
+		trace.WithAttributes(
+			attribute.String("function.id", i.FunctionID),
+			attribute.String("instance.id", i.ID),
+		),
+	)
+	i.span = span
+	i.stdoutWriter.SetSpan(span)
+	i.stderrWriter.SetSpan(span)
 
 	vmIP, err := i.bridgeMgr.AllocateVMIP()
 	if err != nil {
@@ -127,6 +148,8 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
 		BootToken:     cfg.BootToken,
 		MMDSData:      cfg.MMDSData,
+		Stdout:        i.stdoutWriter,
+		Stderr:        i.stderrWriter,
 	}
 
 	i.VCPU = cfg.VCPUCount
@@ -203,6 +226,13 @@ func (i *Instance) Stop() error {
 	log := logger.With("instance", i.ID, "function", i.FunctionID)
 	i.Status = StatusStopping
 
+	if i.stdoutWriter != nil {
+		i.stdoutWriter.Flush()
+	}
+	if i.stderrWriter != nil {
+		i.stderrWriter.Flush()
+	}
+
 	if i.proxyServer != nil {
 		log.Debug("stopping proxy")
 		i.proxyServer.Close()
@@ -218,6 +248,10 @@ func (i *Instance) Stop() error {
 	if i.vmIP != "" {
 		log.Debug("releasing IP", "ip", i.vmIP)
 		i.bridgeMgr.ReleaseVMIP(i.vmIP)
+	}
+
+	if i.span != nil {
+		i.span.End()
 	}
 
 	i.Status = StatusStopped

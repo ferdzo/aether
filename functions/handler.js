@@ -1,7 +1,8 @@
 const http = require('http');
 
-// Your function logic
 const handler = async (event) => {
+  console.log('Handler called');
+  console.log('Event:', event);
   return {
     statusCode: 200,
     body: {
@@ -15,7 +16,6 @@ const handler = async (event) => {
   };
 };
 
-// HTTP server wrapper
 const server = http.createServer(async (req, res) => {
   let body = '';
   
