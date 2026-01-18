@@ -156,6 +156,8 @@ func (h *Handler) coldStart(ctx context.Context, fn *protocol.FunctionMetadata) 
 		job := protocol.Job{
 			RequestID:    id.GenerateRequestID(),
 			FunctionID:   fn.ID,
+			Runtime:      fn.Runtime,
+			Entrypoint:   fn.Entrypoint,
 			VCPU:         fn.VCPU,
 			MemoryMB:     fn.MemoryMB,
 			Port:         fn.Port,

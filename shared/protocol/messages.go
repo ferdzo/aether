@@ -6,12 +6,14 @@ type Job struct {
 	RequestID    string            `json:"request_id"`
 	FunctionID   string            `json:"function_id"`
 	ImageID      string            `json:"image_id"`
+	Runtime      string            `json:"runtime"`
+	Entrypoint   string            `json:"entrypoint"`
 	VCPU         int               `json:"vcpu"`
 	MemoryMB     int               `json:"memory_mb"`
 	Port         int               `json:"port"`
 	Count        int               `json:"count"`
 	EnvVars      map[string]string `json:"env_vars,omitempty"`
-	TraceContext map[string]string `json:"trace_context,omitempty"` // For distributed tracing
+	TraceContext map[string]string `json:"trace_context,omitempty"`
 }
 
 type WorkerNode struct {
@@ -51,16 +53,17 @@ func WorkerKey(workerID string) string {
 }
 
 type FunctionMetadata struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Runtime   string            `json:"runtime"`
-	CodePath  string            `json:"code_path"`
-	VCPU      int               `json:"vcpu"`
-	MemoryMB  int               `json:"memory_mb"`
-	Port      int               `json:"port"`
-	EnvVars   map[string]string `json:"env_vars"`
-	CreatedAt time.Time         `json:"created_at"`
-	UpdatedAt time.Time         `json:"updated_at"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Runtime    string            `json:"runtime"`
+	Entrypoint string            `json:"entrypoint"` // e.g., "handler.js", "main.py", "app.go"
+	CodePath   string            `json:"code_path"`
+	VCPU       int               `json:"vcpu"`
+	MemoryMB   int               `json:"memory_mb"`
+	Port       int               `json:"port"`
+	EnvVars    map[string]string `json:"env_vars"`
+	CreatedAt  time.Time         `json:"created_at"`
+	UpdatedAt  time.Time         `json:"updated_at"`
 }
 
 type Invocation struct {

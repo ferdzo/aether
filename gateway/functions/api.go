@@ -48,11 +48,13 @@ func (api *FunctionsAPI) Routes() chi.Router {
 // POST /api/functions
 func (api *FunctionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name     string            `json:"name"`
-		Runtime  string            `json:"runtime"`
-		VCPU     int               `json:"vcpu"`
-		MemoryMB int               `json:"memory_mb"`
-		EnvVars  map[string]string `json:"env_vars"`
+		Name       string            `json:"name"`
+		Runtime    string            `json:"runtime"`
+		Entrypoint string            `json:"entrypoint"`
+		VCPU       int               `json:"vcpu"`
+		MemoryMB   int               `json:"memory_mb"`
+		Port       int               `json:"port"`
+		EnvVars    map[string]string `json:"env_vars"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -65,12 +67,14 @@ func (api *FunctionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fn := &protocol.FunctionMetadata{
-		ID:       id.GenerateFunctionID(),
-		Name:     req.Name,
-		Runtime:  req.Runtime,
-		VCPU:     req.VCPU,
-		MemoryMB: req.MemoryMB,
-		EnvVars:  req.EnvVars,
+		ID:         id.GenerateFunctionID(),
+		Name:       req.Name,
+		Runtime:    req.Runtime,
+		Entrypoint: req.Entrypoint,
+		VCPU:       req.VCPU,
+		MemoryMB:   req.MemoryMB,
+		Port:       req.Port,
+		EnvVars:    req.EnvVars,
 	}
 
 	if fn.VCPU == 0 {
@@ -139,11 +143,13 @@ func (api *FunctionsAPI) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name     string            `json:"name"`
-		Runtime  string            `json:"runtime"`
-		VCPU     int               `json:"vcpu"`
-		MemoryMB int               `json:"memory_mb"`
-		EnvVars  map[string]string `json:"env_vars"`
+		Name       string            `json:"name"`
+		Runtime    string            `json:"runtime"`
+		Entrypoint string            `json:"entrypoint"`
+		VCPU       int               `json:"vcpu"`
+		MemoryMB   int               `json:"memory_mb"`
+		Port       int               `json:"port"`
+		EnvVars    map[string]string `json:"env_vars"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -156,11 +162,17 @@ func (api *FunctionsAPI) Update(w http.ResponseWriter, r *http.Request) {
 	if req.Runtime != "" {
 		existing.Runtime = req.Runtime
 	}
+	if req.Entrypoint != "" {
+		existing.Entrypoint = req.Entrypoint
+	}
 	if req.VCPU > 0 {
 		existing.VCPU = req.VCPU
 	}
 	if req.MemoryMB > 0 {
 		existing.MemoryMB = req.MemoryMB
+	}
+	if req.Port > 0 {
+		existing.Port = req.Port
 	}
 	if req.EnvVars != nil {
 		existing.EnvVars = req.EnvVars

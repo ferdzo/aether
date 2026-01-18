@@ -40,11 +40,10 @@ func getMemoryMB() int {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				kb, _ := strconv.Atoi(fields[1])
-				return kb / 1024 // Convert KB to MB
+				return kb / 1024
 			}
 		}
 	}
 
 	return 0
 }
-

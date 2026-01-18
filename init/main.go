@@ -13,47 +13,71 @@ import (
 )
 
 type MMDSData struct {
-	Token string            `json:"token"`
-	Env   map[string]string `json:"env"`
+	Token      string            `json:"token"`
+	Env        map[string]string `json:"env"`
+	Entrypoint string            `json:"entrypoint"`
+	Port       int               `json:"port"`
 }
 
 func main() {
 	bootToken := parseBootToken()
-	
-	var envVars map[string]string
+
+	var metadata *MMDSData
 	if bootToken != "" {
 		var err error
-		envVars, err = fetchEnvVars(bootToken)
+		metadata, err = fetchMetadata(bootToken)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "aether-env: warning: %v (continuing without env vars)\n", err)
+			fmt.Fprintf(os.Stderr, "aether-env: warning: %v (continuing with defaults)\n", err)
+			metadata = &MMDSData{Entrypoint: "handler.js"}
 		}
 	} else {
-		fmt.Fprintln(os.Stderr, "aether-env: no boot token, skipping MMDS")
-	}
-
-	if len(os.Args) == 1 {
-		for key, value := range envVars {
-			escaped := strings.ReplaceAll(value, "'", "'\"'\"'")
-			fmt.Printf("export %s='%s'\n", key, escaped)
-		}
-		return
+		fmt.Fprintln(os.Stderr, "aether-env: no boot token, using defaults")
+		metadata = &MMDSData{Entrypoint: "handler.js"}
 	}
 
 	// Set env vars
-	for key, value := range envVars {
+	for key, value := range metadata.Env {
 		os.Setenv(key, value)
 	}
 
-	// Exec the command
-	binary, err := exec.LookPath(os.Args[1])
+	// Determine command to run
+	var args []string
+	if len(os.Args) > 1 {
+		// If args provided, use them (e.g., aether-env node handler.js)
+		args = os.Args[1:]
+	} else {
+		// Auto-detect runtime from entrypoint
+		entrypoint := metadata.Entrypoint
+		if entrypoint == "" {
+			entrypoint = "handler.js"
+		}
+		args = getCommandForEntrypoint(entrypoint)
+	}
+
+	binary, err := exec.LookPath(args[0])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "aether-env: command not found: %s\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "aether-env: command not found: %s\n", args[0])
 		os.Exit(127)
 	}
 
-	if err := syscall.Exec(binary, os.Args[1:], os.Environ()); err != nil {
+	fmt.Fprintf(os.Stderr, "aether-env: running %v\n", args)
+	if err := syscall.Exec(binary, args, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "aether-env: exec failed: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+func getCommandForEntrypoint(entrypoint string) []string {
+	switch {
+	case strings.HasSuffix(entrypoint, ".js"):
+		return []string{"node", entrypoint}
+	case strings.HasSuffix(entrypoint, ".py"):
+		return []string{"python3", entrypoint}
+	case strings.HasSuffix(entrypoint, ".sh"):
+		return []string{"sh", entrypoint}
+	default:
+		// Assume it's an executable
+		return []string{"./" + entrypoint}
 	}
 }
 
@@ -71,10 +95,9 @@ func parseBootToken() string {
 	return ""
 }
 
-func fetchEnvVars(bootToken string) (map[string]string, error) {
+func fetchMetadata(bootToken string) (*MMDSData, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	// Request JSON format from MMDS
 	req, err := http.NewRequest("GET", "http://169.254.169.254/", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -105,6 +128,6 @@ func fetchEnvVars(bootToken string) (map[string]string, error) {
 		return nil, fmt.Errorf("token mismatch (expected %s, got %s)", bootToken, metadata.Token)
 	}
 
-	return metadata.Env, nil
+	return &metadata, nil
 }
 

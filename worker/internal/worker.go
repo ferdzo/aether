@@ -37,10 +37,12 @@ func tracer() trace.Tracer {
 }
 
 type FunctionConfig struct {
-	VCPU    int64
-	MemMB   int64
-	Port    int
-	EnvVars map[string]string
+	Runtime    string
+	Entrypoint string
+	VCPU       int64
+	MemMB      int64
+	Port       int
+	EnvVars    map[string]string
 }
 
 type Worker struct {
@@ -135,11 +137,17 @@ func (w *Worker) handleJob(job []byte) error {
 	if port == 0 {
 		port = 3000
 	}
+	entrypoint := jobData.Entrypoint
+	if entrypoint == "" {
+		entrypoint = "handler.js"
+	}
 	w.functionConfig[jobData.FunctionID] = FunctionConfig{
-		VCPU:    int64(jobData.VCPU),
-		MemMB:   int64(jobData.MemoryMB),
-		Port:    port,
-		EnvVars: jobData.EnvVars,
+		Runtime:    jobData.Runtime,
+		Entrypoint: entrypoint,
+		VCPU:       int64(jobData.VCPU),
+		MemMB:      int64(jobData.MemoryMB),
+		Port:       port,
+		EnvVars:    jobData.EnvVars,
 	}
 	w.mu.Unlock()
 
@@ -197,8 +205,10 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	bootToken := id.GenerateToken()
 	mmdsData := map[string]interface{}{
-		"token": bootToken,
-		"env":   fnCfg.EnvVars,
+		"token":      bootToken,
+		"env":        fnCfg.EnvVars,
+		"entrypoint": fnCfg.Entrypoint,
+		"port":       fnCfg.Port,
 	}
 
 	cfg := InstanceConfig{

@@ -22,13 +22,11 @@ type DB struct {
 }
 
 func NewDB(dbPath string) (*DB, error) {
-	// Enable WAL mode and busy timeout for better concurrency
 	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
-	// Limit connections to avoid contention
 	db.SetMaxOpenConns(1)
 	return &DB{db: db}, nil
 }
@@ -100,31 +98,39 @@ func (d *DB) CreateFunction(fn *protocol.FunctionMetadata) error {
 	if fn.Port == 0 {
 		fn.Port = 3000
 	}
+	if fn.Entrypoint == "" {
+		fn.Entrypoint = "handler.js"
+	}
 	envVarsJSON, err := json.Marshal(fn.EnvVars)
 	if err != nil {
 		return fmt.Errorf("failed to marshal env_vars: %w", err)
 	}
 	_, err = d.db.Exec(
-		`INSERT INTO functions (id, name, runtime, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		fn.ID, fn.Name, fn.Runtime, fn.CodePath, fn.VCPU, fn.MemoryMB, fn.Port, string(envVarsJSON), fn.CreatedAt, fn.UpdatedAt,
+		`INSERT INTO functions (id, name, runtime, entrypoint, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		fn.ID, fn.Name, fn.Runtime, fn.Entrypoint, fn.CodePath, fn.VCPU, fn.MemoryMB, fn.Port, string(envVarsJSON), fn.CreatedAt, fn.UpdatedAt,
 	)
 	return err
 }
 
 func (d *DB) GetFunction(id string) (*protocol.FunctionMetadata, error) {
 	row := d.db.QueryRow(
-		`SELECT id, name, runtime, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at
+		`SELECT id, name, runtime, entrypoint, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at
 		 FROM functions WHERE id = ?`, id,
 	)
 	var fn protocol.FunctionMetadata
 	var envVarsJSON string
-	err := row.Scan(&fn.ID, &fn.Name, &fn.Runtime, &fn.CodePath, &fn.VCPU, &fn.MemoryMB, &fn.Port, &envVarsJSON, &fn.CreatedAt, &fn.UpdatedAt)
+	var entrypoint sql.NullString
+	err := row.Scan(&fn.ID, &fn.Name, &fn.Runtime, &entrypoint, &fn.CodePath, &fn.VCPU, &fn.MemoryMB, &fn.Port, &envVarsJSON, &fn.CreatedAt, &fn.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	fn.Entrypoint = entrypoint.String
+	if fn.Entrypoint == "" {
+		fn.Entrypoint = "handler.js"
 	}
 	if err := json.Unmarshal([]byte(envVarsJSON), &fn.EnvVars); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal env_vars: %w", err)
@@ -134,7 +140,7 @@ func (d *DB) GetFunction(id string) (*protocol.FunctionMetadata, error) {
 
 func (d *DB) GetFunctions() ([]*protocol.FunctionMetadata, error) {
 	rows, err := d.db.Query(
-		`SELECT id, name, runtime, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at FROM functions`,
+		`SELECT id, name, runtime, entrypoint, code_path, vcpu, memory_mb, port, env_vars, created_at, updated_at FROM functions`,
 	)
 	if err != nil {
 		return nil, err
@@ -145,9 +151,14 @@ func (d *DB) GetFunctions() ([]*protocol.FunctionMetadata, error) {
 	for rows.Next() {
 		var fn protocol.FunctionMetadata
 		var envVarsJSON string
-		err := rows.Scan(&fn.ID, &fn.Name, &fn.Runtime, &fn.CodePath, &fn.VCPU, &fn.MemoryMB, &fn.Port, &envVarsJSON, &fn.CreatedAt, &fn.UpdatedAt)
+		var entrypoint sql.NullString
+		err := rows.Scan(&fn.ID, &fn.Name, &fn.Runtime, &entrypoint, &fn.CodePath, &fn.VCPU, &fn.MemoryMB, &fn.Port, &envVarsJSON, &fn.CreatedAt, &fn.UpdatedAt)
 		if err != nil {
 			return nil, err
+		}
+		fn.Entrypoint = entrypoint.String
+		if fn.Entrypoint == "" {
+			fn.Entrypoint = "handler.js"
 		}
 		if err := json.Unmarshal([]byte(envVarsJSON), &fn.EnvVars); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal env_vars: %w", err)
@@ -162,14 +173,17 @@ func (d *DB) UpdateFunction(fn *protocol.FunctionMetadata) error {
 	if fn.EnvVars == nil {
 		fn.EnvVars = make(map[string]string)
 	}
+	if fn.Entrypoint == "" {
+		fn.Entrypoint = "handler.js"
+	}
 	envVarsJSON, err := json.Marshal(fn.EnvVars)
 	if err != nil {
 		return fmt.Errorf("failed to marshal env_vars: %w", err)
 	}
 	_, err = d.db.Exec(
-		`UPDATE functions SET name = ?, runtime = ?, code_path = ?, vcpu = ?, memory_mb = ?, port = ?, env_vars = ?, updated_at = ?
+		`UPDATE functions SET name = ?, runtime = ?, entrypoint = ?, code_path = ?, vcpu = ?, memory_mb = ?, port = ?, env_vars = ?, updated_at = ?
 		 WHERE id = ?`,
-		fn.Name, fn.Runtime, fn.CodePath, fn.VCPU, fn.MemoryMB, fn.Port, string(envVarsJSON), fn.UpdatedAt, fn.ID,
+		fn.Name, fn.Runtime, fn.Entrypoint, fn.CodePath, fn.VCPU, fn.MemoryMB, fn.Port, string(envVarsJSON), fn.UpdatedAt, fn.ID,
 	)
 	return err
 }
