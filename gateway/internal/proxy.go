@@ -3,11 +3,27 @@ package internal
 import (
 	"aether/shared/protocol"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 	"time"
+)
+
+var (
+	// Shared transport for connection pooling
+	defaultTransport = &http.Transport{
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		DisableKeepAlives:     false,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
 )
 
 type Proxy struct {
@@ -22,7 +38,7 @@ func NewProxy(worker *protocol.WorkerNode, instance *protocol.FunctionInstance) 
 func ProxyRequest(w http.ResponseWriter, r *http.Request, instance *protocol.FunctionInstance, funcID string) {
 	target, _ := url.Parse(fmt.Sprintf("http://%s:%d", instance.HostIP, instance.ProxyPort))
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{ResponseHeaderTimeout: 30 * time.Second}
+	proxy.Transport = defaultTransport
 
 	oldPath := r.URL.Path
 	prefix := "/functions/" + funcID
