@@ -40,7 +40,6 @@ func main() {
 		os.Setenv(key, value)
 	}
 
-	// Determine command to run
 	var args []string
 	if len(os.Args) > 1 {
 		// If args provided, use them (e.g., aether-env node handler.js)
@@ -130,4 +129,3 @@ func fetchMetadata(bootToken string) (*MMDSData, error) {
 
 	return &metadata, nil
 }
-

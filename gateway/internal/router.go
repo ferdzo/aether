@@ -20,7 +20,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
 func (c MapCarrier) Get(key string) string { return c[key] }

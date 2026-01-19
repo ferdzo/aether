@@ -62,10 +62,9 @@ func (r *Reaper) check() {
 }
 
 func (r *Reaper) scaleToOne(functionID string, instances []*Instance) {
-	// Keep 1 hot instance, stop others that have been idle
 	for _, inst := range instances {
 		if inst.GetActiveRequests() > 0 {
-			continue // Skip if actively serving
+			continue
 		}
 
 		idleTime := time.Since(inst.LastRequest())

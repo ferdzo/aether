@@ -21,7 +21,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
 func (c MapCarrier) Get(key string) string { return c[key] }
@@ -92,14 +91,13 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 
 	logger.Info("watching queue", "queue", protocol.QueueVMProvision)
 
-	maxInstances := 10 // TODO: make configurable
+	maxInstances := 10
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			// Capacity gate: check if we can handle more instances
 			w.mu.Lock()
 			totalInstances := 0
 			for _, insts := range w.instances {
@@ -113,7 +111,6 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 				continue
 			}
 
-			// Check available RAM
 			freeRAM, err := system.GetFreeRAM()
 			if err == nil && freeRAM < 500 {
 				logger.Info("low memory, waiting", "free_mb", freeRAM)
@@ -422,9 +419,8 @@ func (w *Worker) allocatePort() int {
 		}
 	}
 	logger.Error("no available ports")
-	return 30000 // fallback, will likely fail
+	return 30000
 }
-
 func (w *Worker) releasePort(port int) {
 	if port > 0 {
 		delete(w.usedPorts, port)

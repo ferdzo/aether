@@ -19,7 +19,7 @@ type Scaler struct {
 	activeRequests map[string]int64
 	mu             sync.RWMutex
 	checkInterval  time.Duration
-	threshold      int // requests per instance
+	threshold      int
 }
 
 func NewScaler(redis *redis.Client, discovery *Discovery, database *db.DB) *Scaler {
@@ -29,11 +29,10 @@ func NewScaler(redis *redis.Client, discovery *Discovery, database *db.DB) *Scal
 		db:             database,
 		activeRequests: make(map[string]int64),
 		checkInterval:  1 * time.Second,
-		threshold:      3, // 3 requests per instance
+		threshold:      3,
 	}
 }
 
-// TrackRequest increments/decrements active request count
 func (s *Scaler) TrackRequest(functionID string, delta int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -44,7 +43,6 @@ func (s *Scaler) TrackRequest(functionID string, delta int64) {
 	}
 }
 
-// Run background loop that checks every second
 func (s *Scaler) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.checkInterval)
 	defer ticker.Stop()
@@ -104,7 +102,6 @@ func (s *Scaler) check(ctx context.Context) {
 }
 
 func (s *Scaler) pushProvisionJob(ctx context.Context, functionID string) error {
-	// Get function details from database
 	fn, err := s.db.GetFunction(functionID)
 	if err != nil {
 		return err
