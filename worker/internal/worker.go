@@ -6,6 +6,7 @@ import (
 	"aether/shared/metrics"
 	"aether/shared/network"
 	"aether/shared/protocol"
+	"aether/shared/system"
 	"aether/shared/vm"
 	"context"
 	"encoding/json"
@@ -91,12 +92,36 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 
 	logger.Info("watching queue", "queue", protocol.QueueVMProvision)
 
+	maxInstances := 10 // TODO: make configurable
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			result, err := client.BLPop(ctx, 5*time.Second, protocol.QueueVMProvision).Result()
+			// Capacity gate: check if we can handle more instances
+			w.mu.Lock()
+			totalInstances := 0
+			for _, insts := range w.instances {
+				totalInstances += len(insts)
+			}
+			w.mu.Unlock()
+
+			if totalInstances >= maxInstances {
+				logger.Info("at capacity, waiting", "current", totalInstances, "max", maxInstances)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			// Check available RAM
+			freeRAM, err := system.GetFreeRAM()
+			if err == nil && freeRAM < 500 {
+				logger.Info("low memory, waiting", "free_mb", freeRAM)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			result, err := client.BLPop(ctx, 1*time.Second, protocol.QueueVMProvision).Result()
 			if err != nil {
 				continue
 			}
@@ -388,8 +413,6 @@ func (w *Worker) handleVMDeath(functionID, instanceID string) {
 	}
 }
 
-// allocatePort finds the next available port starting from 30000
-// Must be called with w.mu held
 func (w *Worker) allocatePort() int {
 	for port := 30000; port < 65535; port++ {
 		if !w.usedPorts[port] {
@@ -402,8 +425,6 @@ func (w *Worker) allocatePort() int {
 	return 30000 // fallback, will likely fail
 }
 
-// releasePort returns a port to the available pool
-// Must be called with w.mu held
 func (w *Worker) releasePort(port int) {
 	if port > 0 {
 		delete(w.usedPorts, port)

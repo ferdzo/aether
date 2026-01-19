@@ -48,3 +48,21 @@ func getMemoryMB() int {
 	return 0
 }
 
+func GetFreeRAM() (int, error) {
+	data, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "MemAvailable:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				kb, _ := strconv.Atoi(fields[1])
+				return kb / 1024, nil // Convert KB to MB
+			}
+		}
+	}
+
+	return 0, nil
+}
