@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"aether/shared/logger"
+	"aether/shared/metrics"
 	"aether/shared/storage"
 )
 
@@ -35,6 +36,7 @@ func (c *CodeCache) EnsureCode(functionID string) (string, error) {
 	c.mu.RLock()
 	if path, ok := c.cached[functionID]; ok {
 		c.mu.RUnlock()
+		metrics.CodeCacheHits.Inc()
 		return path, nil
 	}
 	c.mu.RUnlock()
@@ -44,10 +46,12 @@ func (c *CodeCache) EnsureCode(functionID string) (string, error) {
 		c.cached[functionID] = localPath
 		c.mu.Unlock()
 		logger.Debug("code cache hit (disk)", "function", functionID)
+		metrics.CodeCacheHits.Inc()
 		return localPath, nil
 	}
 
 	logger.Info("downloading code from minio", "function", functionID, "bucket", c.bucket)
+	metrics.CodeCacheMisses.Inc()
 	objectPath := functionID + "/code.ext4"
 
 	obj, err := c.minio.GetObject(c.bucket, objectPath)

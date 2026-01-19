@@ -14,6 +14,7 @@ import (
 	"aether/gateway/internal"
 	"aether/shared/db"
 	"aether/shared/logger"
+	"aether/shared/metrics"
 	"aether/shared/storage"
 	"aether/shared/telemetry"
 	"log/slog"
@@ -32,6 +33,7 @@ type Config struct {
 
 func main() {
 	logger.Init(slog.LevelDebug, false)
+	metrics.Init()
 
 	err := godotenv.Load()
 	if err != nil {
@@ -109,6 +111,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.HandleFunc("/functions/{funcID}/*", handler.Handler)
 	r.Mount("/api/functions", functionsAPI.Routes())
+	r.Handle("/metrics", metrics.Handler())
 
 	go func() {
 		sig := make(chan os.Signal, 1)

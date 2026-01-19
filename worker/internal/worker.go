@@ -3,6 +3,7 @@ package internal
 import (
 	"aether/shared/id"
 	"aether/shared/logger"
+	"aether/shared/metrics"
 	"aether/shared/network"
 	"aether/shared/protocol"
 	"aether/shared/vm"
@@ -176,6 +177,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	_, span := tracer().Start(context.Background(), "instance.spawn")
 	defer span.End()
 
+	spawnStart := time.Now()
 	instance := NewInstance(functionID, w.vmMgr, w.bridgeMgr)
 	span.SetAttributes(
 		attribute.String("function.id", functionID),
@@ -232,6 +234,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	w.mu.Lock()
 	proxyPort := w.allocatePort()
+	metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
 	w.mu.Unlock()
 
 	if err := instance.WaitReady(functionPort, 30*time.Second); err != nil {
@@ -249,6 +252,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	w.mu.Lock()
 	w.instances[functionID] = append(w.instances[functionID], instance)
+	metrics.InstancesActive.WithLabelValues(functionID, w.cfg.WorkerID).Set(float64(len(w.instances[functionID])))
 	w.mu.Unlock()
 
 	log.Info("instance started", "vm_ip", instance.GetVMIP(), "proxy_port", proxyPort)
@@ -256,6 +260,9 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	if err := w.registry.RegisterInstance(functionID, instance.ID, proxyPort, instance.vmIP); err != nil {
 		log.Error("failed to register instance", "error", err)
 	}
+
+	metrics.VMSpawnsTotal.WithLabelValues(functionID, "success").Inc()
+	metrics.VMSpawnDuration.WithLabelValues(functionID).Observe(time.Since(spawnStart).Seconds())
 
 	return instance, nil
 }
@@ -309,9 +316,11 @@ func (w *Worker) StopInstance(functionID, instanceID string) error {
 	for i, inst := range instances {
 		if inst.ID == instanceID {
 			w.releasePort(inst.GetProxyPort())
+			metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
 
 			inst.Stop()
 			w.instances[functionID] = append(instances[:i], instances[i+1:]...)
+			metrics.InstancesActive.WithLabelValues(functionID, w.cfg.WorkerID).Set(float64(len(w.instances[functionID])))
 			if len(w.instances[functionID]) == 0 {
 				delete(w.instances, functionID)
 			}
@@ -369,6 +378,8 @@ func (w *Worker) handleCodeUpdate(functionID string) {
 func (w *Worker) handleVMDeath(functionID, instanceID string) {
 	log := logger.With("function", functionID, "instance", instanceID)
 	log.Warn("handling VM death - cleaning up instance")
+
+	metrics.VMDeathsTotal.WithLabelValues(functionID, "unexpected").Inc()
 
 	if err := w.StopInstance(functionID, instanceID); err != nil {
 		log.Error("failed to cleanup dead instance", "error", err)

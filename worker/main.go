@@ -2,11 +2,13 @@ package main
 
 import (
 	"aether/shared/logger"
+	"aether/shared/metrics"
 	"aether/shared/storage"
 	"aether/shared/telemetry"
 	"aether/worker/internal"
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -47,6 +49,7 @@ func readEnv() *internal.Config {
 
 func main() {
 	logger.Init(slog.LevelDebug, false)
+	metrics.Init()
 	logger.Info("Starting Worker")
 	err := godotenv.Load()
 	if err != nil {
@@ -132,10 +135,18 @@ func main() {
 	go scaler.Run(ctx)
 	go worker.WatchCodeUpdates(ctx)
 
+	// Start metrics HTTP server
+	go func() {
+		http.Handle("/metrics", metrics.Handler())
+		logger.Info("metrics server listening", "addr", ":9090")
+		if err := http.ListenAndServe(":9090", nil); err != nil {
+			logger.Error("metrics server error", "error", err)
+		}
+	}()
+
 	if err := worker.Run(ctx); err != nil {
 		logger.Error("worker error", "error", err)
 	}
-
 
 	worker.Shutdown()
 	os.Exit(0)
