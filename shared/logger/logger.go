@@ -3,6 +3,8 @@ package logger
 import (
 	"log/slog"
 	"os"
+
+	"github.com/lmittmann/tint"
 )
 
 var Log *slog.Logger
@@ -20,7 +22,10 @@ func Init(level slog.Level, json bool) {
 	if json {
 		handler = slog.NewJSONHandler(os.Stdout, opts)
 	} else {
-		handler = slog.NewTextHandler(os.Stdout, opts)
+		handler = tint.NewHandler(os.Stdout, &tint.Options{
+			Level:      level,
+			TimeFormat: "15:04:05",
+		})
 	}
 
 	Log = slog.New(handler)
@@ -35,4 +40,3 @@ func Error(msg string, args ...any) { Log.Error(msg, args...) }
 func With(args ...any) *slog.Logger {
 	return Log.With(args...)
 }
-

@@ -48,6 +48,7 @@ type Instance struct {
 	stdoutWriter    *telemetry.VMLogWriter
 	stderrWriter    *telemetry.VMLogWriter
 	span            trace.Span
+	onVMDeath       func(functionID, instanceID string)
 }
 
 type InstanceConfig struct {
@@ -77,7 +78,7 @@ func (i *Instance) GetActiveRequests() int64 {
 	return atomic.LoadInt64(&i.activeRequests)
 }
 
-func (i* Instance) IdleDuration() time.Duration{
+func (i *Instance) IdleDuration() time.Duration {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.lastRequestTime.IsZero() {
@@ -166,6 +167,10 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 
 	log.Info("VM launched", "ip", vmIP, "tap", tapName)
 	i.Status = StatusReady
+
+	// Monitor VM process - cleanup if it dies unexpectedly
+	go i.monitorVM()
+
 	return nil
 }
 
@@ -195,7 +200,7 @@ func (i *Instance) StartProxy(listenPort int, targetPort int) error {
 
 	targetURL := fmt.Sprintf("http://%s:%d", i.vmIP, targetPort)
 	log.Info("creating proxy", "listen_port", listenPort, "vm_ip", i.vmIP, "target_port", targetPort, "target_url", targetURL)
-	
+
 	proxy := NewProxy(targetURL, i)
 	if proxy == nil {
 		return fmt.Errorf("failed to create proxy for %s", targetURL)
@@ -277,4 +282,34 @@ func (i *Instance) GetStatus() InstanceStatus {
 
 func (i *Instance) SetStatus(status InstanceStatus) {
 	i.Status = status
+}
+
+func (i *Instance) SetVMDeathCallback(callback func(functionID, instanceID string)) {
+	i.onVMDeath = callback
+}
+
+func (i *Instance) monitorVM() {
+	log := logger.With("instance", i.ID, "function", i.FunctionID)
+	log.Debug("started VM process monitor")
+
+	err := i.vm.Wait()
+
+	i.mu.Lock()
+	status := i.Status
+	i.mu.Unlock()
+
+	if status == StatusStopping || status == StatusStopped {
+		log.Debug("VM exited normally")
+		return
+	}
+
+	log.Warn("VM died unexpectedly", "error", err)
+	i.SetStatus(StatusError)
+
+	if i.onVMDeath != nil {
+		log.Info("triggering cleanup callback")
+		i.onVMDeath(i.FunctionID, i.ID)
+	} else {
+		log.Warn("no cleanup callback registered")
+	}
 }

@@ -22,8 +22,8 @@ import (
 // MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
-func (c MapCarrier) Get(key string) string        { return c[key] }
-func (c MapCarrier) Set(key, value string)        { c[key] = value }
+func (c MapCarrier) Get(key string) string { return c[key] }
+func (c MapCarrier) Set(key, value string) { c[key] = value }
 func (c MapCarrier) Keys() []string {
 	keys := make([]string, 0, len(c))
 	for k := range c {
@@ -53,6 +53,7 @@ type Worker struct {
 	functionConfig map[string]FunctionConfig
 	mu             sync.Mutex
 	nextPort       int
+	usedPorts      map[int]bool
 	registry       *Registry
 	codeCache      *CodeCache
 	redis          *redis.Client
@@ -66,6 +67,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		instances:      make(map[string][]*Instance),
 		functionConfig: make(map[string]FunctionConfig),
 		nextPort:       30000,
+		usedPorts:      make(map[int]bool),
 		registry:       registry,
 		codeCache:      codeCache,
 		redis:          redisClient,
@@ -113,7 +115,6 @@ func (w *Worker) handleJob(job []byte) error {
 		return fmt.Errorf("failed to unmarshal job: %w", err)
 	}
 
-	// Extract parent trace context from job (propagated from Gateway)
 	ctx := context.Background()
 	if jobData.TraceContext != nil {
 		carrier := MapCarrier(jobData.TraceContext)
@@ -227,9 +228,10 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 		return nil, fmt.Errorf("failed to start instance: %w", err)
 	}
 
+	instance.SetVMDeathCallback(w.handleVMDeath)
+
 	w.mu.Lock()
-	proxyPort := w.nextPort
-	w.nextPort++
+	proxyPort := w.allocatePort()
 	w.mu.Unlock()
 
 	if err := instance.WaitReady(functionPort, 30*time.Second); err != nil {
@@ -238,6 +240,9 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	}
 
 	if err := instance.StartProxy(proxyPort, functionPort); err != nil {
+		w.mu.Lock()
+		w.releasePort(proxyPort)
+		w.mu.Unlock()
 		instance.Stop()
 		return nil, fmt.Errorf("failed to start proxy: %w", err)
 	}
@@ -303,6 +308,8 @@ func (w *Worker) StopInstance(functionID, instanceID string) error {
 
 	for i, inst := range instances {
 		if inst.ID == instanceID {
+			w.releasePort(inst.GetProxyPort())
+
 			inst.Stop()
 			w.instances[functionID] = append(instances[:i], instances[i+1:]...)
 			if len(w.instances[functionID]) == 0 {
@@ -357,4 +364,38 @@ func (w *Worker) handleCodeUpdate(functionID string) {
 	w.mu.Lock()
 	delete(w.functionConfig, functionID)
 	w.mu.Unlock()
+}
+
+func (w *Worker) handleVMDeath(functionID, instanceID string) {
+	log := logger.With("function", functionID, "instance", instanceID)
+	log.Warn("handling VM death - cleaning up instance")
+
+	if err := w.StopInstance(functionID, instanceID); err != nil {
+		log.Error("failed to cleanup dead instance", "error", err)
+	} else {
+		log.Info("dead instance cleaned up successfully")
+	}
+}
+
+// allocatePort finds the next available port starting from 30000
+// Must be called with w.mu held
+func (w *Worker) allocatePort() int {
+	for port := 30000; port < 65535; port++ {
+		if !w.usedPorts[port] {
+			w.usedPorts[port] = true
+			logger.Debug("allocated port", "port", port)
+			return port
+		}
+	}
+	logger.Error("no available ports")
+	return 30000 // fallback, will likely fail
+}
+
+// releasePort returns a port to the available pool
+// Must be called with w.mu held
+func (w *Worker) releasePort(port int) {
+	if port > 0 {
+		delete(w.usedPorts, port)
+		logger.Debug("released port", "port", port)
+	}
 }

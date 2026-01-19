@@ -22,8 +22,8 @@ import (
 // MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
-func (c MapCarrier) Get(key string) string        { return c[key] }
-func (c MapCarrier) Set(key, value string)        { c[key] = value }
+func (c MapCarrier) Get(key string) string { return c[key] }
+func (c MapCarrier) Set(key, value string) { c[key] = value }
 func (c MapCarrier) Keys() []string {
 	keys := make([]string, 0, len(c))
 	for k := range c {
@@ -94,7 +94,7 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		_, coldSpan := tracer().Start(ctx, "function.coldstart")
-		_, err = h.coldStart(ctx, fn)
+		instance, err := h.coldStart(ctx, fn)
 		coldSpan.End()
 		if err != nil {
 			span.RecordError(err)
@@ -105,27 +105,13 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		deadline := time.Now().Add(2 * time.Second)
-		for time.Now().Before(deadline) {
-			instances, _ = h.discovery.GetInstances(ctx, funcID)
-			if len(instances) >= 2 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-
-		if len(instances) == 0 {
-			span.SetStatus(codes.Error, "no instances after cold start")
-			h.recordInvocation(invID, funcID, "error", startTime, "no instances available after cold start")
-			http.Error(w, "no instances available after cold start", http.StatusServiceUnavailable)
-			return
-		}
+		instances = []protocol.FunctionInstance{instance}
 	}
 
 	instance := instances[rand.Intn(len(instances))]
 	span.SetAttributes(attribute.String("instance.id", instance.InstanceID))
 
-	ProxyRequest(w, r, &instance)
+	ProxyRequest(w, r, &instance, funcID)
 	h.recordInvocation(invID, funcID, "success", startTime, "")
 }
 
@@ -169,9 +155,9 @@ func (h *Handler) coldStart(ctx context.Context, fn *protocol.FunctionMetadata) 
 			return protocol.FunctionInstance{}, fmt.Errorf("failed to push job: %w", err)
 		}
 
-		instance, err := h.discovery.WaitForInstance(ctx, fn.ID, 30*time.Second)
+		instance, err := h.discovery.WaitForInstance(ctx, fn.ID, 10*time.Second)
 		if err != nil {
-			return protocol.FunctionInstance{}, fmt.Errorf("failed to wait for instance: %w", err)
+			return protocol.FunctionInstance{}, fmt.Errorf("cold start failed: %w", err)
 		}
 		return instance, nil
 	})

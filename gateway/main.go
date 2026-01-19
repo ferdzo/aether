@@ -23,14 +23,15 @@ import (
 	"github.com/joho/godotenv"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
+
 type Config struct {
 	EtcdEndpoints []string
-	RedisAddr string
-	Port int
+	RedisAddr     string
+	Port          int
 }
 
 func main() {
-	logger.Init(slog.LevelDebug, true)
+	logger.Init(slog.LevelDebug, false)
 
 	err := godotenv.Load()
 	if err != nil {
@@ -50,7 +51,7 @@ func main() {
 	}
 	config := Config{
 		EtcdEndpoints: strings.Split(os.Getenv("ETCD_ENDPOINTS"), ","),
-		RedisAddr: os.Getenv("REDIS_ADDR"),
+		RedisAddr:     os.Getenv("REDIS_ADDR"),
 		Port: func() int {
 			val := os.Getenv("PORT")
 			if val == "" {
@@ -65,13 +66,13 @@ func main() {
 	}
 
 	etcdClient, err := internal.NewEtcdClient(config.EtcdEndpoints)
-	if err != nil{
+	if err != nil {
 		logger.Error("Error creating etcd client", "error", err)
 		os.Exit(1)
 	}
 	defer internal.CloseEtcd(etcdClient)
 	redisClient, err := internal.NewRedisClient(config.RedisAddr)
-	if err != nil{
+	if err != nil {
 		logger.Error("Error creating redis client", "error", err)
 		os.Exit(1)
 	}
@@ -108,7 +109,6 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.HandleFunc("/functions/{funcID}/*", handler.Handler)
 	r.Mount("/api/functions", functionsAPI.Routes())
-
 
 	go func() {
 		sig := make(chan os.Signal, 1)

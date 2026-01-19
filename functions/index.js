@@ -3,6 +3,16 @@ const http = require('http');
 const handler = async (event) => {
   console.log('Handler called');
   console.log('Event:', event);
+  
+  // Crash on /crash endpoint
+  if (event.url && event.url.includes('/crash')) {
+    console.log('CRASH REQUESTED - throwing uncaught exception NOW');
+    process.nextTick(() => {
+      throw new Error('INTENTIONAL CRASH - Testing VM behavior');
+    });
+    return { statusCode: 200, body: { message: 'Crashing immediately after response...' } };
+  }
+  
   return {
     statusCode: 200,
     body: {

@@ -22,11 +22,13 @@ type DB struct {
 }
 
 func NewDB(dbPath string) (*DB, error) {
+	// Enable WAL mode and busy timeout for better concurrency
 	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL"
 	db, err := sql.Open("sqlite3", dsn)
 	if err != nil {
 		return nil, err
 	}
+	// Limit connections to avoid contention
 	db.SetMaxOpenConns(1)
 	return &DB{db: db}, nil
 }
