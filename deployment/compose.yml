@@ -93,6 +93,21 @@ services:
       - tempo
     networks:
       - aether
+  
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - 9091:9090
+    volumes:
+      - prometheus_data:/prometheus
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yaml
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yaml'
+      - '--storage.tsdb.path=/prometheus'
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - aether
 
 volumes:
   redis_data:
@@ -101,3 +116,4 @@ volumes:
   loki_data:
   tempo_data:
   grafana_data:
+  prometheus_data:

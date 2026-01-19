@@ -4,6 +4,7 @@ import (
 	"aether/shared/db"
 	"aether/shared/id"
 	"aether/shared/logger"
+	"aether/shared/metrics"
 	"aether/shared/protocol"
 	"context"
 	"fmt"
@@ -61,11 +62,17 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 	invID := id.GenerateInvocationID()
 	span.SetAttributes(attribute.String("invocation.id", invID))
 
+	metrics.ActiveRequests.Inc()
+	defer metrics.ActiveRequests.Dec()
+
+	discoveryStart := time.Now()
 	instances, err := h.discovery.GetInstances(ctx, funcID)
+	metrics.InstanceDiscoveryDuration.Observe(time.Since(discoveryStart).Seconds())
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 		h.recordInvocation(invID, funcID, "error", startTime, err.Error())
+		metrics.RecordInvocation(funcID, "error", time.Since(startTime))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -76,6 +83,7 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "failed to get function")
 			h.recordInvocation(invID, funcID, "error", startTime, err.Error())
+			metrics.RecordInvocation(funcID, "error", time.Since(startTime))
 			logger.Error("failed to get function", "function", funcID, "error", err)
 			http.Error(w, "failed to get function", http.StatusInternalServerError)
 			return
@@ -83,23 +91,27 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 		if fn == nil {
 			span.SetStatus(codes.Error, "function not found")
 			h.recordInvocation(invID, funcID, "error", startTime, "function not found")
+			metrics.RecordInvocation(funcID, "error", time.Since(startTime))
 			http.Error(w, "function not found", http.StatusNotFound)
 			return
 		}
 		if fn.CodePath == "" {
 			span.SetStatus(codes.Error, "function code not uploaded")
 			h.recordInvocation(invID, funcID, "error", startTime, "function code not uploaded")
+			metrics.RecordInvocation(funcID, "error", time.Since(startTime))
 			http.Error(w, "function code not uploaded", http.StatusBadRequest)
 			return
 		}
 
 		_, coldSpan := tracer().Start(ctx, "function.coldstart")
+		metrics.ColdStartsTotal.WithLabelValues(funcID).Inc()
 		instance, err := h.coldStart(ctx, fn)
 		coldSpan.End()
 		if err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, "cold start failed")
 			h.recordInvocation(invID, funcID, "error", startTime, err.Error())
+			metrics.RecordInvocation(funcID, "error", time.Since(startTime))
 			logger.Error("cold start failed", "function", funcID, "error", err)
 			http.Error(w, "failed to cold start function", http.StatusInternalServerError)
 			return
@@ -113,6 +125,7 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 
 	ProxyRequest(w, r, &instance, funcID)
 	h.recordInvocation(invID, funcID, "success", startTime, "")
+	metrics.RecordInvocation(funcID, "success", time.Since(startTime))
 }
 
 func (h *Handler) recordInvocation(invID, funcID, status string, startTime time.Time, errMsg string) {
@@ -152,6 +165,7 @@ func (h *Handler) coldStart(ctx context.Context, fn *protocol.FunctionMetadata) 
 			TraceContext: traceCtx,
 		}
 		if err := h.redis.PushJob(&job); err != nil {
+			metrics.QueuePublishErrors.Inc()
 			return protocol.FunctionInstance{}, fmt.Errorf("failed to push job: %w", err)
 		}
 

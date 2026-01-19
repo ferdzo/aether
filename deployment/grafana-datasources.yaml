@@ -1,11 +1,17 @@
 apiVersion: 1
 
 datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
   - name: Tempo
     type: tempo
     access: proxy
     url: http://tempo:3200
-    isDefault: true
     jsonData:
       tracesToLogsV2:
         datasourceUid: loki
@@ -13,11 +19,16 @@ datasources:
         filterByTraceID: false
         filterBySpanID: false
       serviceMap:
-        datasourceUid: ''
+        datasourceUid: prometheus
       nodeGraph:
         enabled: true
       lokiSearch:
         datasourceUid: loki
+      tracesToMetrics:
+        datasourceUid: prometheus
+        queries:
+          - name: Request rate
+            query: 'rate(aether_invocations_total{$$__tags}[5m])'
 
   - name: Loki
     type: loki
