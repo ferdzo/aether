@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -112,16 +111,7 @@ func main() {
 	defer internal.CloseRedisClient(redisClient)
 
 	worker := internal.NewWorker(config, registry, codeCache, redisClient)
-	scalingCfg := internal.ScalingConfig{
-		Enabled:          true,
-		CheckInterval:    1 * time.Second,
-		ScaleUpThreshold: 3,
-		ScaleDownAfter:   30 * time.Second,
-		MinInstances:     1,
-		MaxInstances:     10,
-		ScaleToZeroAfter: 5 * time.Minute,
-	}
-	scaler := internal.NewScaler(worker, &scalingCfg)
+	reaper := internal.NewReaper(worker)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -132,7 +122,7 @@ func main() {
 		logger.Info("shutting down...")
 		cancel()
 	}()
-	go scaler.Run(ctx)
+	go reaper.Run(ctx)
 	go worker.WatchCodeUpdates(ctx)
 
 	// Start metrics HTTP server

@@ -58,8 +58,11 @@ func GetFreeRAM() (int, error) {
 		if strings.HasPrefix(line, "MemAvailable:") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				kb, _ := strconv.Atoi(fields[1])
-				return kb / 1024, nil // Convert KB to MB
+				kb, err := strconv.Atoi(fields[1])
+				if err != nil {
+					return 0, err
+				}
+				return kb / 1024, nil
 			}
 		}
 	}

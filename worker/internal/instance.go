@@ -49,6 +49,7 @@ type Instance struct {
 	stderrWriter    *telemetry.VMLogWriter
 	span            trace.Span
 	onVMDeath       func(functionID, instanceID string)
+	shuttingDown    atomic.Bool
 }
 
 type InstanceConfig struct {

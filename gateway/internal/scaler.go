@@ -20,16 +20,19 @@ type Scaler struct {
 	mu             sync.RWMutex
 	checkInterval  time.Duration
 	threshold      int
+	maxInstances   int
 }
 
-func NewScaler(redis *redis.Client, discovery *Discovery, database *db.DB) *Scaler {
+func NewScaler(redis *redis.Client, discovery *Discovery, database *db.DB, checkInterval time.Duration, threshold int, maxInstances int) *Scaler {
 	return &Scaler{
 		redis:          redis,
 		discovery:      discovery,
 		db:             database,
 		activeRequests: make(map[string]int64),
-		checkInterval:  1 * time.Second,
-		threshold:      3,
+		mu:             sync.RWMutex{},
+		checkInterval:  checkInterval,
+		threshold:      threshold,
+		maxInstances:   maxInstances,
 	}
 }
 
@@ -65,12 +68,14 @@ func (s *Scaler) check(ctx context.Context) {
 	}
 	s.mu.RUnlock()
 
+	var toCleanup []string
+
 	for functionID, activeCount := range snapshot {
 		if activeCount == 0 {
+			toCleanup = append(toCleanup, functionID)
 			continue
 		}
 
-		// Get current instance count from etcd
 		instances, err := s.discovery.GetInstances(ctx, functionID)
 		if err != nil {
 			logger.Error("failed to get instances", "function", functionID, "error", err)
@@ -81,6 +86,11 @@ func (s *Scaler) check(ctx context.Context) {
 
 		// Calculate target instances: ceil(active / threshold)
 		targetCount := int((activeCount + int64(s.threshold) - 1) / int64(s.threshold))
+
+		// Cap target at maxInstances to prevent runaway scaling
+		if targetCount > s.maxInstances {
+			targetCount = s.maxInstances
+		}
 
 		if targetCount > currentCount {
 			deficit := targetCount - currentCount
@@ -98,6 +108,16 @@ func (s *Scaler) check(ctx context.Context) {
 				}
 			}
 		}
+	}
+
+	if len(toCleanup) > 0 {
+		s.mu.Lock()
+		for _, functionID := range toCleanup {
+			if s.activeRequests[functionID] == 0 {
+				delete(s.activeRequests, functionID)
+			}
+		}
+		s.mu.Unlock()
 	}
 }
 

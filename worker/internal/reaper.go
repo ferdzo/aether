@@ -46,16 +46,9 @@ func (r *Reaper) check() {
 		if len(instances) == 0 {
 			continue
 		}
-
-		// Two-tier scale-down strategy:
-		// 1. If multiple instances: scale idle ones to keep 1 hot (30s idle)
-		// 2. If single instance: scale to zero only after 5-10 minutes
-
 		if len(instances) > r.minInstancesPerFunc {
-			// Multiple instances: aggressive scale-down to 1 hot
 			r.scaleToOne(functionID, instances)
 		} else if len(instances) == 1 {
-			// Single instance: conservative scale to zero
 			r.scaleToZero(functionID, instances[0])
 		}
 	}
@@ -67,13 +60,21 @@ func (r *Reaper) scaleToOne(functionID string, instances []*Instance) {
 			continue
 		}
 
+		if inst.shuttingDown.Load() {
+			continue
+		}
+
 		idleTime := time.Since(inst.LastRequest())
 		if idleTime > r.scaleToOneAfter {
+			inst.shuttingDown.Store(true)
+
+			remainingInstances := len(instances) - 1
+
 			logger.Info("reaper scaling down to 1",
 				"function", functionID,
 				"instance", inst.ID,
 				"idle_time", idleTime,
-				"remaining_instances", len(instances)-1)
+				"remaining_instances", remainingInstances)
 
 			go func(fid, iid string) {
 				if err := r.worker.StopInstance(fid, iid); err != nil {
@@ -91,8 +92,16 @@ func (r *Reaper) scaleToZero(functionID string, inst *Instance) {
 		return
 	}
 
+	// Skip if already shutting down
+	if inst.shuttingDown.Load() {
+		return
+	}
+
 	idleTime := time.Since(inst.LastRequest())
 	if idleTime > r.scaleToZeroAfter {
+		// Mark as shutting down to prevent concurrent shutdown attempts
+		inst.shuttingDown.Store(true)
+
 		logger.Info("reaper scaling to zero",
 			"function", functionID,
 			"instance", inst.ID,

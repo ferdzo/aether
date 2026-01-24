@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"aether/gateway/functions"
 	"aether/gateway/internal"
@@ -104,10 +105,9 @@ func main() {
 
 	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client())
 	discovery := internal.NewDiscovery(etcdClient)
-	scaler := internal.NewScaler(redisClient.Client(), discovery, dbClient)
+	scaler := internal.NewScaler(redisClient.Client(), discovery, dbClient, 1*time.Second, 3, 10)
 	handler := internal.NewHandler(discovery, redisClient, dbClient, scaler)
 
-	// Start scaler background loop
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go scaler.Run(ctx)
