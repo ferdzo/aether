@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"aether/gateway/functions"
 	"aether/gateway/internal"
@@ -104,7 +105,12 @@ func main() {
 
 	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client())
 	discovery := internal.NewDiscovery(etcdClient)
-	handler := internal.NewHandler(discovery, redisClient, dbClient)
+	scaler := internal.NewScaler(redisClient.Client(), discovery, dbClient, 1*time.Second, 3, 10)
+	handler := internal.NewHandler(discovery, redisClient, dbClient, scaler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go scaler.Run(ctx)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -118,6 +124,7 @@ func main() {
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
 		logger.Info("Shutting down...")
+		cancel()
 		os.Exit(0)
 	}()
 

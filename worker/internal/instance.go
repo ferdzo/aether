@@ -49,6 +49,7 @@ type Instance struct {
 	stderrWriter    *telemetry.VMLogWriter
 	span            trace.Span
 	onVMDeath       func(functionID, instanceID string)
+	shuttingDown    atomic.Bool
 }
 
 type InstanceConfig struct {
@@ -76,6 +77,18 @@ func (i *Instance) DecrementActiveRequests() {
 
 func (i *Instance) GetActiveRequests() int64 {
 	return atomic.LoadInt64(&i.activeRequests)
+}
+
+func (i *Instance) Touch() {
+	i.mu.Lock()
+	i.lastRequestTime = time.Now()
+	i.mu.Unlock()
+}
+
+func (i *Instance) LastRequest() time.Time {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.lastRequestTime
 }
 
 func (i *Instance) IdleDuration() time.Duration {
