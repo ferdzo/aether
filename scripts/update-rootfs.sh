@@ -40,7 +40,7 @@ mount -o loop "$ROOTFS" "$MOUNT_POINT"
 
 echo ""
 echo "=== Installing aether-env ==="
-cp aether-env "$MOUNT_POINT/usr/bin/aether-env"
+cp "$AETHER_ENV_BIN" "$MOUNT_POINT/usr/bin/aether-env"
 chmod +x "$MOUNT_POINT/usr/bin/aether-env"
 echo "Installed: $(ls -la $MOUNT_POINT/usr/bin/aether-env)"
 
