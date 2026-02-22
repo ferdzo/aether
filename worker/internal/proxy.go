@@ -22,6 +22,5 @@ func NewProxy(targetURL string, instance *Instance) *Proxy {
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.instance.IncrementActiveRequests()
 	defer p.instance.DecrementActiveRequests()
-	p.instance.Touch() // Update last request time
 	p.proxy.ServeHTTP(w, r)
 }
