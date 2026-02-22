@@ -103,13 +103,13 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 			for _, insts := range w.instances {
 				totalInstances += len(insts)
 			}
-			w.mu.Unlock()
-
 			if totalInstances >= maxInstances {
+				w.mu.Unlock()
 				logger.Info("at capacity, waiting", "current", totalInstances, "max", maxInstances)
 				time.Sleep(500 * time.Millisecond)
 				continue
 			}
+			w.mu.Unlock()
 
 			freeRAM, err := system.GetFreeRAM()
 			if err == nil && freeRAM < 500 {
