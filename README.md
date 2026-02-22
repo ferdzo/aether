@@ -2,18 +2,11 @@
 
 Serverless functions on Firecracker microVMs.
 
-## Features
-
-- **Strong isolation** - Each function runs in its own microVM
-- **Fast cold starts** - ~1.5s boot time
-- **Auto-scaling** - Scale up on demand, scale to zero when idle
-- **Environment variables** - Secrets passed securely via MMDS
-
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                           GATEWAY                                 │
+│                           GATEWAY                                │
 │  • API for function management (CRUD)                            │
 │  • Routes invocations to workers                                 │
 │  • Triggers cold starts when no instances available              │

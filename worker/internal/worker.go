@@ -6,6 +6,7 @@ import (
 	"aether/shared/metrics"
 	"aether/shared/network"
 	"aether/shared/protocol"
+	"aether/shared/system"
 	"aether/shared/vm"
 	"context"
 	"encoding/json"
@@ -20,7 +21,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
 func (c MapCarrier) Get(key string) string { return c[key] }
@@ -91,12 +91,34 @@ func (w *Worker) watchQueue(ctx context.Context) error {
 
 	logger.Info("watching queue", "queue", protocol.QueueVMProvision)
 
+	maxInstances := 10
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			result, err := client.BLPop(ctx, 5*time.Second, protocol.QueueVMProvision).Result()
+			w.mu.Lock()
+			totalInstances := 0
+			for _, insts := range w.instances {
+				totalInstances += len(insts)
+			}
+			if totalInstances >= maxInstances {
+				w.mu.Unlock()
+				logger.Info("at capacity, waiting", "current", totalInstances, "max", maxInstances)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			w.mu.Unlock()
+
+			freeRAM, err := system.GetFreeRAM()
+			if err == nil && freeRAM < 500 {
+				logger.Info("low memory, waiting", "free_mb", freeRAM)
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+
+			result, err := client.BLPop(ctx, 1*time.Second, protocol.QueueVMProvision).Result()
 			if err != nil {
 				continue
 			}
@@ -388,8 +410,6 @@ func (w *Worker) handleVMDeath(functionID, instanceID string) {
 	}
 }
 
-// allocatePort finds the next available port starting from 30000
-// Must be called with w.mu held
 func (w *Worker) allocatePort() int {
 	for port := 30000; port < 65535; port++ {
 		if !w.usedPorts[port] {
@@ -399,11 +419,8 @@ func (w *Worker) allocatePort() int {
 		}
 	}
 	logger.Error("no available ports")
-	return 30000 // fallback, will likely fail
+	return 30000
 }
-
-// releasePort returns a port to the available pool
-// Must be called with w.mu held
 func (w *Worker) releasePort(port int) {
 	if port > 0 {
 		delete(w.usedPorts, port)

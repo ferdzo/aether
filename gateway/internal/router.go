@@ -20,7 +20,6 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
-// MapCarrier implements propagation.TextMapCarrier for a map
 type MapCarrier map[string]string
 
 func (c MapCarrier) Get(key string) string { return c[key] }
@@ -41,14 +40,16 @@ type Handler struct {
 	discovery   *Discovery
 	redis       *RedisClient
 	db          *db.DB
+	scaler      *Scaler
 	coldStartSF singleflight.Group
 }
 
-func NewHandler(discovery *Discovery, redis *RedisClient, database *db.DB) *Handler {
+func NewHandler(discovery *Discovery, redis *RedisClient, database *db.DB, scaler *Scaler) *Handler {
 	return &Handler{
 		discovery: discovery,
 		redis:     redis,
 		db:        database,
+		scaler:    scaler,
 	}
 }
 
@@ -64,7 +65,9 @@ func (h *Handler) Handler(w http.ResponseWriter, r *http.Request) {
 
 	metrics.ActiveRequests.Inc()
 	defer metrics.ActiveRequests.Dec()
-
+	// Track request for scaling
+	h.scaler.TrackRequest(funcID, 1)
+	defer h.scaler.TrackRequest(funcID, -1)
 	discoveryStart := time.Now()
 	instances, err := h.discovery.GetInstances(ctx, funcID)
 	metrics.InstanceDiscoveryDuration.Observe(time.Since(discoveryStart).Seconds())

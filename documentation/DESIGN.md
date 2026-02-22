@@ -13,20 +13,26 @@ A Function-as-a-Service (FaaS) platform built on Firecracker microVMs.
 │  │ Functions   │  │   Router    │  │  Discovery  │  │    Cold Start       │ │
 │  │ API (CRUD)  │  │  (chi)      │  │  (etcd)     │  │    (singleflight)   │ │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │                                   │                   │
-         ▼                                   ▼                   ▼
-┌─────────────┐                      ┌─────────────┐     ┌─────────────┐
-│    MinIO    │                      │    etcd     │     │    Redis    │
-│  (code.ext4)│                      │  (registry) │     │   (queue)   │
-└─────────────┘                      └─────────────┘     └─────────────┘
-         ▲                                   ▲                   │
-         │                                   │                   ▼
+│                           │                                                  │
+│                    ┌──────▼──────────┐                                       │
+│                    │  Scale-Up Logic │  <-- Tracks active requests          │
+│                    │   (1s interval) │      Pushes provision jobs           │
+│                    └──────┬──────────┘                                       │
+└───────────────────────────┼──────────────────────────────────────────────────┘
+         │                  │                  │                   │
+         ▼                  ▼                  ▼                   ▼
+┌─────────────┐      ┌─────────────┐   ┌─────────────┐     ┌─────────────┐
+│    MinIO    │      │    Redis    │   │    etcd     │     │  PostgreSQL │
+│  (code.ext4)│      │   (queue)   │   │  (registry) │     │  (metadata) │
+└─────────────┘      └─────────────┘   └─────────────┘     └─────────────┘
+         ▲                  │                  ▲                   ▲
+         │                  ▼                  │                   │
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                                  WORKER                                      │
+│                                WORKER(S)                                     │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
-│  │ Code Cache  │  │   Scaler    │  │  Registry   │  │    Job Consumer     │ │
-│  │  (local)    │  │ (auto-scale)│  │  (etcd)     │  │    (Redis BLPOP)    │ │
+│  │ Code Cache  │  │Scale-Down   │  │  Registry   │  │    Job Consumer     │ │
+│  │  (local)    │  │   Reaper    │  │  (etcd)     │  │ + Capacity Gate     │ │
+│  │             │  │ (10s check) │  │             │  │   (Redis BLPOP)     │ │
 │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────┘ │
 │         │                │                │                   │              │
 │         ▼                ▼                ▼                   ▼              │
@@ -247,46 +253,126 @@ func (c *CodeCache) EnsureCode(functionID string) (string, error) {
 }
 ```
 
-#### 2.5 Auto-Scaling
+#### 2.5 Auto-Scaling (Split Architecture)
 
-**File:** `worker/internal/scaler.go`
+**Scaling is now split between Gateway (scale-up) and Worker (scale-down).**
 
-The scaler runs every second and adjusts instance count:
+##### Gateway Scaler - Control Plane
+
+**File:** `gateway/internal/scaler.go`
+
+The gateway tracks active requests and decides when to scale up:
 
 ```go
-type ScalingConfig struct {
-    CheckInterval    time.Duration  // 1s
-    ScaleUpThreshold int            // Avg concurrency to trigger scale up (3)
-    ScaleDownAfter   time.Duration  // Idle time before scale down (30s)
-    MinInstances     int            // Keep warm (1)
-    MaxInstances     int            // Cap (10)
-    ScaleToZeroAfter time.Duration  // Full idle time to scale to zero (5m)
+type Scaler struct {
+    mu             sync.RWMutex
+    activeRequests map[string]int  // function_id -> active count
+    redis          *redis.Client
+    discovery      *internal.Discovery
+    db             *db.DB
+}
+
+func (s *Scaler) check() {
+    for functionID, activeReq := range s.activeRequests {
+        currentInstances := s.discovery.GetInstanceCount(functionID)
+        targetInstances := int(math.Ceil(float64(activeReq) / 3.0))
+        
+        if targetInstances > currentInstances {
+            deficit := targetInstances - currentInstances
+            for i := 0; i < deficit; i++ {
+                s.pushProvisionJob(functionID)
+            }
+        }
+    }
 }
 ```
 
-**Scaling Logic:**
+**Scale-Up Flow:**
+1. Router calls `TrackRequest(fnID, +1)` on request start
+2. Router calls `TrackRequest(fnID, -1)` on request complete  
+3. Scaler checks every 1s: if `active/instances > 3`, push provision job
+4. Fetches complete function metadata from database (entrypoint, VCPU, memory, port, env)
+5. Pushes fully-populated Job to `queue:vm_provision`
+
+##### Worker Reaper - Scale-Down
+
+**File:** `worker/internal/reaper.go`
+
+Workers manage instance lifecycle and scale down based on idle time:
+
 ```go
-func (s *Scaler) checkFunction(functionID string, instances []*Instance) {
-    // Calculate metrics
-    avgConcurrency := totalActive / len(instances)
-    minIdleDuration := // shortest idle time among all instances
-    
-    // Scale UP: high concurrency
-    if avgConcurrency > threshold && len(instances) < max {
-        go s.worker.SpawnInstance(functionID)
-    }
-    
-    // Scale to ZERO: all instances idle for 5+ minutes
-    if totalActive == 0 && minIdleDuration > scaleToZeroAfter {
-        // Kill all instances
-    }
-    
-    // Normal scale DOWN: keep MinInstances warm
-    if len(instances) > minInstances {
-        // Kill idle instances beyond minimum
+type Reaper struct {
+    worker        *Worker
+    checkInterval time.Duration  // 10s
+}
+
+func (r *Reaper) check() {
+    for _, instances := range r.worker.instances {
+        if len(instances) > 1 {
+            r.scaleToOne(functionID, instances)  // 30s idle → 1 hot
+        } else if len(instances) == 1 {
+            r.scaleToZero(functionID, instances) // 5min idle → 0
+        }
     }
 }
 ```
+
+**Scale-Down Flow:**
+1. Proxy calls `instance.Touch()` on every request
+2. Reaper checks every 10s for idle instances
+3. Two-tier strategy:
+   - Multiple instances: Scale to 1 hot after 30s idle
+   - Single instance: Scale to zero after 5 minutes idle
+4. Only stops 1 instance per cycle to prevent stampede
+
+##### Worker Capacity Gate
+
+**File:** `worker/internal/worker.go`
+
+Workers self-regulate job consumption based on capacity:
+
+```go
+func (w *Worker) watchQueue(ctx context.Context) {
+    for {
+        // Capacity check before consuming job
+        totalInstances := w.countAllInstances()
+        freeRAM := system.GetFreeRAM()
+        
+        if totalInstances >= 10 || freeRAM < 500 {
+            time.Sleep(500 * time.Millisecond)
+            continue
+        }
+        
+        // Consume job (1s timeout)
+        result, err := w.redis.BLPop(ctx, 1*time.Second, "queue:vm_provision")
+        if err == nil {
+            w.handleJob(ctx, result[1])
+        }
+    }
+}
+```
+
+##### Configuration
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| CheckInterval (Gateway) | 1s | How often scaler checks |
+| ScaleUpThreshold | 3 req/instance | Trigger scale up |
+| CheckInterval (Reaper) | 10s | How often reaper runs |
+| ScaleDownAfter | 30s | Idle time before scaling to 1 |
+| ScaleToZeroAfter | 5m | Complete idle before scaling to 0 |
+| MaxInstances | 10 | Per-worker capacity limit |
+| MinFreeRAM | 500MB | Required RAM before spawning |
+
+##### Multi-Worker Behavior
+
+- Multiple workers compete for jobs via atomic BLPop
+- Each worker checks capacity independently (no coordination); this is a best-effort check and is subject to a TOCTOU race with instance spawning
+- In periods of high concurrency, multiple workers may all pass the capacity check and briefly exceed `MaxInstances` in aggregate; strict enforcement would require additional coordination
+- Reaper runs on all workers, but only stops 1 instance per cycle
+- Gateway is unaware of worker count (fully decoupled), so it does not enforce a global capacity limit across workers
+
+**See:** `documentation/SPLIT_SCALER.md` for detailed analysis and test results.
 
 #### 2.6 Code Update Handler
 
