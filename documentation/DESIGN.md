@@ -367,9 +367,10 @@ func (w *Worker) watchQueue(ctx context.Context) {
 ##### Multi-Worker Behavior
 
 - Multiple workers compete for jobs via atomic BLPop
-- Each worker checks capacity independently (no coordination)
+- Each worker checks capacity independently (no coordination); this is a best-effort check and is subject to a TOCTOU race with instance spawning
+- In periods of high concurrency, multiple workers may all pass the capacity check and briefly exceed `MaxInstances` in aggregate; strict enforcement would require additional coordination
 - Reaper runs on all workers, but only stops 1 instance per cycle
-- Gateway is unaware of worker count (fully decoupled)
+- Gateway is unaware of worker count (fully decoupled), so it does not enforce a global capacity limit across workers
 
 **See:** `documentation/SPLIT_SCALER.md` for detailed analysis and test results.
 
