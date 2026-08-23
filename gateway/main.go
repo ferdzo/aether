@@ -90,6 +90,15 @@ func main() {
 		logger.Error("Error creating minio client", "error", err)
 		os.Exit(1)
 	}
+
+	codeBucket := os.Getenv("MINIO_BUCKET")
+	if codeBucket == "" {
+		codeBucket = "function-code"
+	}
+	if err := minioClient.EnsureBucket(codeBucket); err != nil {
+		logger.Error("Error ensuring code bucket", "error", err)
+		os.Exit(1)
+	}
 	dbClient, err := db.NewDB(os.Getenv("DB_PATH"))
 	if err != nil {
 		logger.Error("Error creating db client", "error", err)
