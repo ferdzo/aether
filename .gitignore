@@ -31,3 +31,4 @@ vm_key*
 .run/
 gateway/gateway
 worker/worker
+init/init
