@@ -51,6 +51,7 @@ type Instance struct {
 	stderrWriter    *telemetry.VMLogWriter
 	span            trace.Span
 	onVMDeath       func(functionID, instanceID string)
+	onRequest       func(functionID string)
 }
 
 type InstanceConfig struct {
@@ -298,6 +299,16 @@ func (i *Instance) SetStatus(status InstanceStatus) {
 
 func (i *Instance) SetVMDeathCallback(callback func(functionID, instanceID string)) {
 	i.onVMDeath = callback
+}
+
+func (i *Instance) SetOnRequest(callback func(functionID string)) {
+	i.onRequest = callback
+}
+
+func (i *Instance) noteRequest() {
+	if i.onRequest != nil {
+		i.onRequest(i.FunctionID)
+	}
 }
 
 func (i *Instance) monitorVM() {
