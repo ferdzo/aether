@@ -9,8 +9,10 @@ import (
 	"aether/shared/vm"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,9 +60,14 @@ type Worker struct {
 	registry       *Registry
 	codeCache      *CodeCache
 	redis          *redis.Client
+	consumerName   string
 }
 
 func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClient *redis.Client) *Worker {
+	consumerName := cfg.WorkerID
+	if consumerName == "" {
+		consumerName = id.GetWorkerID()
+	}
 	return &Worker{
 		cfg:            cfg,
 		vmMgr:          vm.NewManager(cfg.FirecrackerBin),
@@ -72,6 +79,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		registry:       registry,
 		codeCache:      codeCache,
 		redis:          redisClient,
+		consumerName:   consumerName,
 	}
 }
 
@@ -80,36 +88,148 @@ func (w *Worker) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
 	}
 
+	if err := w.ensureStreamGroup(ctx); err != nil {
+		return fmt.Errorf("failed to create consumer group: %w", err)
+	}
+
+	go w.claimStaleJobs(ctx)
+
 	return w.watchQueue(ctx)
 }
 
-func (w *Worker) watchQueue(ctx context.Context) error {
-	client, err := NewRedisClient(w.cfg.RedisAddr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to redis: %w", err)
+func (w *Worker) ensureStreamGroup(ctx context.Context) error {
+	err := w.redis.XGroupCreateMkStream(ctx, protocol.StreamProvision, protocol.StreamGroup, "0").Err()
+	if err != nil && strings.Contains(err.Error(), "BUSYGROUP") {
+		return nil
 	}
+	return err
+}
 
-	logger.Info("watching queue", "queue", protocol.QueueVMProvision)
+func (w *Worker) watchQueue(ctx context.Context) error {
+	logger.Info("watching provision stream", "stream", protocol.StreamProvision, "group", protocol.StreamGroup)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			result, err := client.BLPop(ctx, 5*time.Second, protocol.QueueVMProvision).Result()
-			if err != nil {
-				continue
-			}
-			if len(result) < 2 {
-				continue
-			}
+		}
 
-			if err := w.handleJob([]byte(result[1])); err != nil {
-				logger.Error("job failed", "error", err)
+		result, err := w.redis.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    protocol.StreamGroup,
+			Consumer: w.consumerName,
+			Streams:  []string{protocol.StreamProvision, ">"},
+			Count:    1,
+			Block:    5 * time.Second,
+		}).Result()
+		if err != nil {
+			if ctx.Err() != nil || err == redis.Nil {
+				continue
+			}
+			logger.Error("failed to read from provision stream", "error", err)
+			time.Sleep(time.Second)
+			continue
+		}
+
+		for _, stream := range result {
+			for _, msg := range stream.Messages {
+				w.processMessage(ctx, msg)
 			}
 		}
 	}
 }
+
+var (
+	staleClaimCheckEvery = 30 * time.Second
+	staleClaimAfter      = 70 * time.Second // MUST exceed max spawn time (~30s WaitReady) or booting VMs get double-spawned
+	staleClaimBatchSize  = int64(10)
+)
+
+func (w *Worker) claimStaleJobs(ctx context.Context) {
+	ticker := time.NewTicker(staleClaimCheckEvery)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		w.claimOnce(ctx)
+	}
+}
+
+func (w *Worker) claimOnce(ctx context.Context) {
+	pending, err := w.redis.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: protocol.StreamProvision,
+		Group:  protocol.StreamGroup,
+		Idle:   staleClaimAfter,
+		Start:  "-",
+		End:    "+",
+		Count:  staleClaimBatchSize,
+	}).Result()
+	if err != nil {
+		if ctx.Err() == nil && err != redis.Nil {
+			logger.Error("failed to inspect pending entries", "error", err)
+		}
+		return
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	ids := make([]string, 0, len(pending))
+	for _, p := range pending {
+		ids = append(ids, p.ID)
+	}
+
+	msgs, err := w.redis.XClaim(ctx, &redis.XClaimArgs{
+		Stream:   protocol.StreamProvision,
+		Group:    protocol.StreamGroup,
+		Consumer: w.consumerName,
+		MinIdle:  staleClaimAfter,
+		Messages: ids,
+	}).Result()
+	if err != nil {
+		logger.Error("failed to claim stale entries", "error", err)
+		return
+	}
+
+	logger.Warn("claimed stale provision entries for reprocessing", "count", len(msgs), "idle_threshold", staleClaimAfter)
+	metrics.StaleClaimsTotal.Add(float64(len(msgs)))
+
+	for _, msg := range msgs {
+		w.processMessage(ctx, msg)
+	}
+}
+
+// processMessage acks only on success — a failed job stays pending for redelivery.
+func (w *Worker) processMessage(ctx context.Context, msg redis.XMessage) {
+	raw, ok := msg.Values["job"].(string)
+	if !ok {
+		// Unparseable jobs can never succeed; retrying would wedge the pending list.
+		logger.Error("malformed stream message, dropping", "message_id", msg.ID, "values", msg.Values)
+		metrics.PoisonJobsTotal.Inc()
+		w.ackMessage(ctx, msg.ID)
+		return
+	}
+
+	if err := w.handleJob([]byte(raw)); err != nil {
+		logger.Error("job failed, leaving pending for redelivery", "message_id", msg.ID, "error", err)
+		metrics.JobRetriesTotal.Inc()
+		return
+	}
+
+	w.ackMessage(ctx, msg.ID)
+}
+
+func (w *Worker) ackMessage(ctx context.Context, id string) {
+	if err := w.redis.XAck(ctx, protocol.StreamProvision, protocol.StreamGroup, id).Err(); err != nil {
+		logger.Error("failed to ack message", "message_id", id, "error", err)
+	}
+}
+
 func (w *Worker) handleJob(job []byte) error {
 	var jobData protocol.Job
 	if err := json.Unmarshal(job, &jobData); err != nil {
@@ -158,17 +278,36 @@ func (w *Worker) handleJob(job []byte) error {
 		count = 1
 	}
 
+	// Idempotency guard: if another consumer already fulfilled this job
+	// (e.g. it died mid-spawn and the entry was redelivered), skip spawning.
+	if ready, err := w.registry.HasReadyInstance(jobData.FunctionID); err == nil && ready {
+		log.Info("ready instance already registered, skipping spawn")
+		span.SetAttributes(attribute.Bool("job.idempotent_skip", true))
+		return nil
+	}
+
 	var wg sync.WaitGroup
+	errCh := make(chan error, count)
 	for i := 0; i < count; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if _, err := w.SpawnInstance(jobData.FunctionID); err != nil {
 				log.Error("failed to spawn instance", "error", err)
+				errCh <- err
 			}
 		}()
 	}
 	wg.Wait()
+	close(errCh)
+
+	var spawnErrs []error
+	for err := range errCh {
+		spawnErrs = append(spawnErrs, err)
+	}
+	if err := errors.Join(spawnErrs...); err != nil {
+		return fmt.Errorf("instance spawn failed (%d/%d): %w", len(spawnErrs), count, err)
+	}
 
 	return nil
 }
@@ -238,6 +377,10 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	w.mu.Unlock()
 
 	if err := instance.WaitReady(functionPort, 30*time.Second); err != nil {
+		w.mu.Lock()
+		w.releasePort(proxyPort)
+		metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
+		w.mu.Unlock()
 		instance.Stop()
 		return nil, fmt.Errorf("instance not ready: %w", err)
 	}
@@ -245,6 +388,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	if err := instance.StartProxy(proxyPort, functionPort); err != nil {
 		w.mu.Lock()
 		w.releasePort(proxyPort)
+		metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
 		w.mu.Unlock()
 		instance.Stop()
 		return nil, fmt.Errorf("failed to start proxy: %w", err)
@@ -315,6 +459,11 @@ func (w *Worker) StopInstance(functionID, instanceID string) error {
 
 	for i, inst := range instances {
 		if inst.ID == instanceID {
+			// Unregister BEFORE draining so gateway traffic stops (~2s cache TTL) while in-flight requests finish.
+			if err := w.registry.UnregisterInstance(functionID, instanceID); err != nil {
+				logger.Error("failed to unregister instance", "function", functionID, "instance", instanceID, "error", err)
+			}
+
 			w.releasePort(inst.GetProxyPort())
 			metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
 
@@ -323,9 +472,6 @@ func (w *Worker) StopInstance(functionID, instanceID string) error {
 			metrics.InstancesActive.WithLabelValues(functionID, w.cfg.WorkerID).Set(float64(len(w.instances[functionID])))
 			if len(w.instances[functionID]) == 0 {
 				delete(w.instances, functionID)
-			}
-			if err := w.registry.UnregisterInstance(functionID, instanceID); err != nil {
-				logger.Error("failed to unregister instance", "function", functionID, "instance", instanceID, "error", err)
 			}
 			return nil
 		}

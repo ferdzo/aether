@@ -128,6 +128,29 @@ func (r *Registry) UnregisterInstance(functionID, instanceID string) error {
 	return nil
 }
 
+// HasReadyInstance is the idempotency guard for provision-job redelivery:
+// true means another consumer already fulfilled this job with a ready VM.
+func (r *Registry) HasReadyInstance(functionID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	resp, err := r.client.Get(ctx,
+		protocol.EtcdFuncPrefix+functionID+"/instances/",
+		etcd.WithPrefix())
+	if err != nil {
+		return false, fmt.Errorf("failed to query instances: %w", err)
+	}
+	for _, kv := range resp.Kvs {
+		var inst protocol.FunctionInstance
+		if err := json.Unmarshal(kv.Value, &inst); err != nil {
+			continue
+		}
+		if inst.Status == "ready" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *Registry) Close() error {
 	return r.client.Close()
 }
