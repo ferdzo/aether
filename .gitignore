@@ -25,5 +25,6 @@ vm_key*
 *.swp
 
 
+*.db.assets/
 *.zip
-*.db
+.assets/
