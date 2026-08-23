@@ -28,3 +28,6 @@ vm_key*
 *.db.assets/
 *.zip
 .assets/
+.run/
+gateway/gateway
+worker/worker
