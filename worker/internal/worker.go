@@ -60,6 +60,7 @@ type Worker struct {
 	usedPorts      map[int]bool
 	registry       *Registry
 	codeCache      *CodeCache
+	runtimeCache   *RuntimeCache
 	redis          *redis.Client
 	consumerName   string
 }
@@ -333,7 +334,17 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	w.mu.Lock()
 	fnCfg := w.functionConfig[functionID]
+	runtimeCache := w.runtimeCache
 	w.mu.Unlock()
+
+	rootfs := w.cfg.RuntimePath
+	if runtimeCache != nil && fnCfg.Runtime != "" {
+		if p, err := runtimeCache.Ensure(fnCfg.Runtime); err != nil {
+			logger.Warn("runtime image unavailable, using configured rootfs", "runtime", fnCfg.Runtime, "error", err)
+		} else {
+			rootfs = p
+		}
+	}
 
 	vcpu, memMB := fnCfg.VCPU, fnCfg.MemMB
 	if vcpu == 0 {
@@ -357,7 +368,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
-		RuntimePath:  w.cfg.RuntimePath,
+		RuntimePath:  rootfs,
 		CodePath:     codePath,
 		SocketPath:   filepath.Join(w.cfg.SocketDir, instance.ID+".sock"),
 		VCPUCount:    vcpu,
@@ -448,6 +459,8 @@ func (w *Worker) LastInvoked(functionID string) (time.Time, bool) {
 	t, ok := w.lastInvoked[functionID]
 	return t, ok
 }
+
+func (w *Worker) SetRuntimeCache(rc *RuntimeCache) { w.runtimeCache = rc }
 
 func (w *Worker) InstanceCount(functionID string) int {
 	w.mu.Lock()

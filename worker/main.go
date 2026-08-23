@@ -111,6 +111,16 @@ func main() {
 
 	codeCache := internal.NewCodeCache(minioClient, config.MinioBucket, config.CodeCacheDir)
 
+	runtimesDir := os.Getenv("RUNTIMES_CACHE_DIR")
+	if runtimesDir == "" {
+		runtimesDir = "/var/aether/runtimes"
+	}
+	if err := minioClient.EnsureBucket("runtimes"); err != nil {
+		logger.Error("Error ensuring runtimes bucket", "error", err)
+		os.Exit(1)
+	}
+	runtimeCache := internal.NewRuntimeCache(minioClient, "runtimes", runtimesDir)
+
 	redisClient, err := internal.NewRedisClient(config.RedisAddr)
 	if err != nil {
 		logger.Error("Error creating redis client", "error", err)
@@ -119,6 +129,7 @@ func main() {
 	defer internal.CloseRedisClient(redisClient)
 
 	worker := internal.NewWorker(config, registry, codeCache, redisClient)
+	worker.SetRuntimeCache(runtimeCache)
 	scalingCfg := internal.ScalingConfig{
 		Enabled:          true,
 		CheckInterval:    1 * time.Second,
