@@ -25,5 +25,10 @@ vm_key*
 *.swp
 
 
+*.db.assets/
 *.zip
-*.db
+.assets/
+.run/
+gateway/gateway
+worker/worker
+init/init
