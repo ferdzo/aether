@@ -33,6 +33,8 @@ type Config struct {
 	TAPDeviceName string
 	VMIP          string
 	GatewayIP     string
+	GuestMask     string // defaults to 255.255.255.0; /30 networks pass 255.255.255.252
+	NetNSPath     string // when set, the VM process runs inside this named netns
 	BootToken     string
 	MMDSData      map[string]interface{}
 	Stdout        io.Writer
@@ -78,9 +80,13 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 		os.Remove(cfg.SocketPath)
 	}
 
+	guestMask := cfg.GuestMask
+	if guestMask == "" {
+		guestMask = "255.255.255.0"
+	}
 	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off init=/init"
 	if cfg.VMIP != "" && cfg.GatewayIP != "" {
-		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ipv6.disable=1 init=/init ip=%s::%s:255.255.255.0::eth0:off", cfg.VMIP, cfg.GatewayIP)
+		bootArgs = fmt.Sprintf("console=ttyS0 reboot=k panic=1 pci=off ipv6.disable=1 init=/init ip=%s::%s:%s::eth0:off", cfg.VMIP, cfg.GatewayIP, guestMask)
 	}
 	if cfg.BootToken != "" {
 		bootArgs = fmt.Sprintf("%s aether_token=%s", bootArgs, cfg.BootToken)
@@ -120,6 +126,10 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	if cfg.MMDSData != nil {
 		fcCfg.MmdsVersion = firecracker.MMDSv1
 		fcCfg.MmdsAddress = net.ParseIP("169.254.169.254")
+	}
+
+	if cfg.NetNSPath != "" {
+		fcCfg.NetNS = cfg.NetNSPath
 	}
 
 	if cfg.TAPDeviceName != "" {
