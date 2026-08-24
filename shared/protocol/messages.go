@@ -27,18 +27,19 @@ type WorkerNode struct {
 }
 
 type FunctionInstance struct {
-	InstanceID string `json:"instance_id"`
-	FunctionID string `json:"function_id"`
-	WorkerID   string `json:"worker_id"`
-	HostIP     string `json:"host_ip"`
-	ProxyPort  int    `json:"proxy_port"`
-	InternalIP string `json:"internal_ip"`
-	Status     string `json:"status"`
+	InstanceID string    `json:"instance_id"`
+	FunctionID string    `json:"function_id"`
+	WorkerID   string    `json:"worker_id"`
+	HostIP     string    `json:"host_ip"`
+	ProxyPort  int       `json:"proxy_port"`
+	InternalIP string    `json:"internal_ip"`
+	Status     string    `json:"status"`
 	StartedAt  time.Time `json:"started_at"`
 }
 
 const (
-	QueueVMProvision  = "queue:vm_provision"
+	StreamProvision   = "stream:vm_provision"
+	StreamGroup       = "aether-workers"
 	ChannelCodeUpdate = "channel:code_update"
 	EtcdFuncPrefix    = "/functions/"
 	EtcdWorkerPrefix  = "/workers/"

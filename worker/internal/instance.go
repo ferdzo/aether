@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,7 @@ type Instance struct {
 	vm              *vm.VM
 	tap             *network.TAPDevice
 	vmIP            string
+	socketPath      string
 	activeRequests  int64
 	lastRequestTime time.Time
 	proxyPort       int
@@ -155,6 +157,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 
 	i.VCPU = cfg.VCPUCount
 	i.MemMB = cfg.MemSizeMB
+	i.socketPath = cfg.SocketPath
 
 	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "code_path", cfg.CodePath)
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
@@ -239,12 +242,21 @@ func (i *Instance) Stop() error {
 	}
 
 	if i.proxyServer != nil {
-		log.Debug("stopping proxy")
-		i.proxyServer.Close()
+		log.Debug("draining proxy")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := i.proxyServer.Shutdown(ctx); err != nil {
+			log.Warn("proxy shutdown incomplete", "error", err)
+		}
 	}
 	if i.vm != nil {
 		log.Debug("stopping VM")
 		i.vm.Stop()
+	}
+	if i.socketPath != "" {
+		if err := os.Remove(i.socketPath); err != nil && !os.IsNotExist(err) {
+			log.Warn("failed to remove firecracker socket", "path", i.socketPath, "error", err)
+		}
 	}
 	if i.tap != nil {
 		log.Debug("deleting TAP", "tap", i.tap.Name)

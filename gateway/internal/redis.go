@@ -14,7 +14,7 @@ type RedisClient struct {
 	client *redis.Client
 }
 
-func NewRedisClient(addr string) ( *RedisClient, error) {
+func NewRedisClient(addr string) (*RedisClient, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr: addr,
 	})
@@ -26,7 +26,7 @@ func NewRedisClient(addr string) ( *RedisClient, error) {
 
 	logger.Info("connected to redis", "addr", addr)
 	return &RedisClient{client: client}, nil
-}	
+}
 
 func (r *RedisClient) Close() error {
 	if err := r.client.Close(); err != nil {
@@ -41,7 +41,10 @@ func (r *RedisClient) PushJob(job *protocol.Job) error {
 	if err != nil {
 		return err
 	}
-	return r.client.LPush(context.Background(), protocol.QueueVMProvision, data).Err()
+	return r.client.XAdd(context.Background(), &redis.XAddArgs{
+		Stream: protocol.StreamProvision,
+		Values: map[string]interface{}{"job": string(data)},
+	}).Err()
 }
 
 func (r *RedisClient) Client() *redis.Client {

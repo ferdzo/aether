@@ -57,6 +57,27 @@ var (
 		},
 	)
 
+	JobRetriesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aether_job_retries_total",
+			Help: "Total number of provision jobs left unacked for redelivery",
+		},
+	)
+
+	StaleClaimsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aether_stale_claims_total",
+			Help: "Total number of stale stream entries claimed for reprocessing",
+		},
+	)
+
+	PoisonJobsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "aether_poison_jobs_total",
+			Help: "Total number of malformed provision jobs dropped",
+		},
+	)
+
 	// Worker metrics
 	InstancesActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -155,6 +176,9 @@ func Init() {
 	prometheus.MustRegister(ActiveRequests)
 	prometheus.MustRegister(InstanceDiscoveryDuration)
 	prometheus.MustRegister(QueuePublishErrors)
+	prometheus.MustRegister(JobRetriesTotal)
+	prometheus.MustRegister(StaleClaimsTotal)
+	prometheus.MustRegister(PoisonJobsTotal)
 
 	// Worker metrics
 	prometheus.MustRegister(InstancesActive)
