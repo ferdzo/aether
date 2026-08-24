@@ -61,6 +61,7 @@ type Worker struct {
 	registry       *Registry
 	codeCache      *CodeCache
 	runtimeCache   *RuntimeCache
+	netnsMgr       *network.NetnsManager
 	redis          *redis.Client
 	consumerName   string
 }
@@ -87,7 +88,9 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if err := w.bridgeMgr.EnsureBridge(); err != nil {
+	if w.netnsMgr != nil {
+		logger.Info("network mode", "mode", "netns")
+	} else if err := w.bridgeMgr.EnsureBridge(); err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
 	}
 
@@ -384,6 +387,9 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	instance.SetVMDeathCallback(w.handleVMDeath)
 	instance.SetOnRequest(w.MarkInvoked)
+	if w.netnsMgr != nil {
+		instance.SetNetnsManager(w.netnsMgr)
+	}
 
 	w.mu.Lock()
 	proxyPort := w.allocatePort()
@@ -461,6 +467,8 @@ func (w *Worker) LastInvoked(functionID string) (time.Time, bool) {
 }
 
 func (w *Worker) SetRuntimeCache(rc *RuntimeCache) { w.runtimeCache = rc }
+
+func (w *Worker) SetNetnsManager(m *network.NetnsManager) { w.netnsMgr = m }
 
 func (w *Worker) InstanceCount(functionID string) int {
 	w.mu.Lock()

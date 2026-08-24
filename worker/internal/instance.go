@@ -52,6 +52,8 @@ type Instance struct {
 	span            trace.Span
 	onVMDeath       func(functionID, instanceID string)
 	onRequest       func(functionID string)
+	netnsMgr        *network.NetnsManager
+	inet            *network.InstanceNet
 }
 
 type InstanceConfig struct {
@@ -118,26 +120,53 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	i.stdoutWriter.SetSpan(span)
 	i.stderrWriter.SetSpan(span)
 
-	vmIP, err := i.bridgeMgr.AllocateVMIP()
-	if err != nil {
-		return fmt.Errorf("failed to allocate IP: %w", err)
-	}
-	i.vmIP = vmIP
-	log.Debug("allocated IP", "ip", vmIP)
+	var (
+		inet *network.InstanceNet
+		tap  *network.TAPDevice
+		tapName, vmIP string
+		err   error
+	)
 
-	tapName := i.bridgeMgr.NextTAPName()
-	tap, err := i.bridgeMgr.CreateTAPDevice(tapName)
-	if err != nil {
-		i.bridgeMgr.ReleaseVMIP(vmIP)
-		return fmt.Errorf("failed to create TAP: %w", err)
-	}
-	i.tap = tap
-	log.Debug("created TAP", "tap", tapName)
+	if i.netnsMgr != nil {
+		inet, err = i.netnsMgr.Setup(i.ID)
+		if err != nil {
+			return fmt.Errorf("failed to set up isolated network: %w", err)
+		}
+		i.inet = inet
+		tapName, vmIP = inet.TapName, inet.GuestIP
+		i.vmIP = vmIP
+		log.Debug("isolated network ready", "ns", inet.NSName, "guest_ip", vmIP, "gateway", inet.HostIP)
+	} else {
+		vmIP, err = i.bridgeMgr.AllocateVMIP()
+		if err != nil {
+			return fmt.Errorf("failed to allocate IP: %w", err)
+		}
+		i.vmIP = vmIP
+		log.Debug("allocated IP", "ip", vmIP)
 
-	if err := i.bridgeMgr.AttachTAPToBridge(tap.Name); err != nil {
-		i.bridgeMgr.DeleteTAPDevice(tap.Name)
-		i.bridgeMgr.ReleaseVMIP(vmIP)
-		return fmt.Errorf("failed to attach TAP: %w", err)
+		tapName = i.bridgeMgr.NextTAPName()
+		tap, err = i.bridgeMgr.CreateTAPDevice(tapName)
+		if err != nil {
+			i.bridgeMgr.ReleaseVMIP(vmIP)
+			return fmt.Errorf("failed to create TAP: %w", err)
+		}
+		i.tap = tap
+		log.Debug("created TAP", "tap", tapName)
+
+		if err := i.bridgeMgr.AttachTAPToBridge(tap.Name); err != nil {
+			i.bridgeMgr.DeleteTAPDevice(tap.Name)
+			i.bridgeMgr.ReleaseVMIP(vmIP)
+			return fmt.Errorf("failed to attach TAP: %w", err)
+		}
+	}
+
+	gateway := i.bridgeMgr.GetGatewayIP()
+	guestMask := ""
+	netNSPath := ""
+	if inet != nil {
+		gateway = inet.HostIP
+		guestMask = inet.GuestMask
+		netNSPath = "/var/run/netns/" + inet.NSName
 	}
 
 	vmCfg := vm.Config{
@@ -147,9 +176,11 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		SocketPath:    cfg.SocketPath,
 		VCPUCount:     cfg.VCPUCount,
 		MemSizeMB:     cfg.MemSizeMB,
-		TAPDeviceName: tap.Name,
+		TAPDeviceName: tapName,
 		VMIP:          vmIP,
-		GatewayIP:     i.bridgeMgr.GetGatewayIP(),
+		GatewayIP:     gateway,
+		GuestMask:     guestMask,
+		NetNSPath:     netNSPath,
 		BootToken:     cfg.BootToken,
 		MMDSData:      cfg.MMDSData,
 		Stdout:        i.stdoutWriter,
@@ -163,8 +194,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "code_path", cfg.CodePath)
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
 	if err != nil {
-		i.bridgeMgr.DeleteTAPDevice(tap.Name)
-		i.bridgeMgr.ReleaseVMIP(vmIP)
+		i.rollbackNetwork()
 		return fmt.Errorf("failed to launch VM: %w", err)
 	}
 	i.vm = vmInstance
@@ -176,6 +206,28 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	go i.monitorVM()
 
 	return nil
+}
+
+// rollbackNetwork undoes whichever network mode was provisioned when a later
+// startup stage fails, so neither bridge nor netns resources leak.
+func (i *Instance) rollbackNetwork() {
+	if i.inet != nil {
+		if i.netnsMgr != nil {
+			i.netnsMgr.Teardown(i.inet)
+		}
+		i.inet = nil
+		i.vmIP = ""
+		i.tap = nil
+		return
+	}
+	if i.tap != nil {
+		i.bridgeMgr.DeleteTAPDevice(i.tap.Name)
+		i.tap = nil
+	}
+	if i.vmIP != "" {
+		i.bridgeMgr.ReleaseVMIP(i.vmIP)
+		i.vmIP = ""
+	}
 }
 
 func (i *Instance) WaitReady(port int, timeout time.Duration) error {
@@ -259,13 +311,21 @@ func (i *Instance) Stop() error {
 			log.Warn("failed to remove firecracker socket", "path", i.socketPath, "error", err)
 		}
 	}
-	if i.tap != nil {
-		log.Debug("deleting TAP", "tap", i.tap.Name)
-		i.bridgeMgr.DeleteTAPDevice(i.tap.Name)
-	}
-	if i.vmIP != "" {
-		log.Debug("releasing IP", "ip", i.vmIP)
-		i.bridgeMgr.ReleaseVMIP(i.vmIP)
+	if i.inet != nil {
+		log.Debug("tearing down isolated network", "ns", i.inet.NSName)
+		if i.netnsMgr != nil {
+			i.netnsMgr.Teardown(i.inet)
+		}
+		i.inet = nil
+	} else {
+		if i.tap != nil {
+			log.Debug("deleting TAP", "tap", i.tap.Name)
+			i.bridgeMgr.DeleteTAPDevice(i.tap.Name)
+		}
+		if i.vmIP != "" {
+			log.Debug("releasing IP", "ip", i.vmIP)
+			i.bridgeMgr.ReleaseVMIP(i.vmIP)
+		}
 	}
 
 	if i.span != nil {
@@ -303,6 +363,10 @@ func (i *Instance) SetVMDeathCallback(callback func(functionID, instanceID strin
 
 func (i *Instance) SetOnRequest(callback func(functionID string)) {
 	i.onRequest = callback
+}
+
+func (i *Instance) SetNetnsManager(m *network.NetnsManager) {
+	i.netnsMgr = m
 }
 
 func (i *Instance) noteRequest() {
