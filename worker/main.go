@@ -101,6 +101,13 @@ func main() {
 	if config.CodeCacheDir == "" {
 		config.CodeCacheDir = "/var/aether/cache"
 	}
+	if config.SocketDir == "" {
+		config.SocketDir = "/tmp/firecracker"
+	}
+	if err := os.MkdirAll(config.SocketDir, 0o755); err != nil {
+		logger.Error("Error creating firecracker socket dir", "error", err)
+		os.Exit(1)
+	}
 
 	codeCache := internal.NewCodeCache(minioClient, config.MinioBucket, config.CodeCacheDir)
 
