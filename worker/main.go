@@ -3,6 +3,7 @@ package main
 import (
 	"aether/shared/logger"
 	"aether/shared/metrics"
+	"aether/shared/network"
 	"aether/shared/storage"
 	"aether/shared/telemetry"
 	"aether/worker/internal"
@@ -130,6 +131,37 @@ func main() {
 
 	worker := internal.NewWorker(config, registry, codeCache, redisClient)
 	worker.SetRuntimeCache(runtimeCache)
+
+	networkMode := os.Getenv("NET_MODE")
+	if networkMode == "" {
+		networkMode = "bridge"
+	}
+	if networkMode == "netns" {
+		supernet := os.Getenv("NETNS_SUPERNET")
+		if supernet == "" {
+			supernet = "172.31.0.0/16"
+		}
+		netnsMgr, err := network.NewNetnsManager(supernet)
+		if err != nil {
+			logger.Error("Error creating netns manager", "error", err)
+			os.Exit(1)
+		}
+		worker.SetNetnsManager(netnsMgr)
+
+		extIface, ifaceErr := network.GetDefaultInterface()
+		if ifaceErr != nil {
+			logger.Warn("egress NAT unavailable: no default interface detected", "error", ifaceErr)
+		} else if nat := network.NewBridgeManager("", supernet); nat != nil {
+			if err := nat.SetupNAT(extIface); err != nil {
+				logger.Warn("egress NAT setup failed; functions remain isolated", "error", err)
+			} else {
+				logger.Info("egress NAT configured", "supernet", supernet, "external_iface", extIface)
+			}
+		}
+		logger.Info("network mode: netns", "supernet", supernet)
+	} else {
+		logger.Info("network mode: bridge")
+	}
 	scalingCfg := internal.ScalingConfig{
 		Enabled:          true,
 		CheckInterval:    1 * time.Second,
