@@ -9,6 +9,9 @@ help: ## Show available targets
 setup: ## Download VM assets and seed env files (idempotent)
 	bash scripts/setup.sh
 
+runtime: ## Build and push a guest runtime: make runtime IMAGE=python:3.12-alpine NAME=python
+	bash scripts/build-runtime.sh $(IMAGE) $(NAME)
+
 build: ## Build gateway and worker binaries
 	cd gateway && go build -o gateway .
 	cd worker && go build -o worker .
@@ -21,6 +24,7 @@ test: ## Vet + run unit tests in every module
 dev: build ## Start infra + gateway (background) + worker (foreground)
 	mkdir -p $(RUN)
 	docker compose -f deployment/compose.yml up -d
+	@curl -sfI http://localhost:2600/runtimes/node/rootfs.ext4 > /dev/null 2>&1 || bash scripts/build-runtime.sh node:20-alpine node
 	(cd gateway && nohup ./gateway > ../$(RUN)/gateway.log 2>&1 & echo $$! > ../$(RUN)/gateway.pid)
 	@echo ">> gateway on http://localhost:8080 (logs: .run/gateway.log)"
 	@echo ">> starting worker in foreground — ctrl-c to drain and stop"
