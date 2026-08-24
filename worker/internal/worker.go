@@ -54,6 +54,7 @@ type Worker struct {
 	bridgeMgr      *network.BridgeManager
 	instances      map[string][]*Instance
 	functionConfig map[string]FunctionConfig
+	lastInvoked    map[string]time.Time
 	mu             sync.Mutex
 	nextPort       int
 	usedPorts      map[int]bool
@@ -74,6 +75,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		bridgeMgr:      network.NewBridgeManager(cfg.BridgeName, cfg.BridgeCIDR),
 		instances:      make(map[string][]*Instance),
 		functionConfig: make(map[string]FunctionConfig),
+		lastInvoked:    make(map[string]time.Time),
 		nextPort:       30000,
 		usedPorts:      make(map[int]bool),
 		registry:       registry,
@@ -370,6 +372,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	}
 
 	instance.SetVMDeathCallback(w.handleVMDeath)
+	instance.SetOnRequest(w.MarkInvoked)
 
 	w.mu.Lock()
 	proxyPort := w.allocatePort()
@@ -430,6 +433,20 @@ func (w *Worker) GetInstances(functionID string) ([]*Instance, bool) {
 	defer w.mu.Unlock()
 	instances, ok := w.instances[functionID]
 	return instances, ok && len(instances) > 0
+}
+
+// MarkInvoked feeds the scaler's warm window: recently invoked functions keep MinInstances.
+func (w *Worker) MarkInvoked(functionID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastInvoked[functionID] = time.Now()
+}
+
+func (w *Worker) LastInvoked(functionID string) (time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t, ok := w.lastInvoked[functionID]
+	return t, ok
 }
 
 func (w *Worker) InstanceCount(functionID string) int {

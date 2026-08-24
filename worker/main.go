@@ -127,6 +127,7 @@ func main() {
 		MinInstances:     1,
 		MaxInstances:     10,
 		ScaleToZeroAfter: 5 * time.Minute,
+		WarmWindow:       10 * time.Minute,
 	}
 	scaler := internal.NewScaler(worker, &scalingCfg)
 

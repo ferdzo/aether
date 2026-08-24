@@ -20,6 +20,7 @@ func NewProxy(targetURL string, instance *Instance) *Proxy {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.instance.noteRequest()
 	p.instance.IncrementActiveRequests()
 	defer p.instance.DecrementActiveRequests()
 	p.proxy.ServeHTTP(w, r)
