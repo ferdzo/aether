@@ -90,6 +90,15 @@ func main() {
 		logger.Error("Error creating minio client", "error", err)
 		os.Exit(1)
 	}
+
+	codeBucket := os.Getenv("MINIO_BUCKET")
+	if codeBucket == "" {
+		codeBucket = "function-code"
+	}
+	if err := minioClient.EnsureBucket(codeBucket); err != nil {
+		logger.Error("Error ensuring code bucket", "error", err)
+		os.Exit(1)
+	}
 	dbClient, err := db.NewDB(os.Getenv("DB_PATH"))
 	if err != nil {
 		logger.Error("Error creating db client", "error", err)
@@ -102,7 +111,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client())
+	lokiURL := os.Getenv("LOKI_URL")
+	if lokiURL == "" {
+		lokiURL = "http://localhost:3100"
+	}
+	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client(), functions.NewLokiClient(lokiURL), os.Getenv("AUTH_TOKEN"))
 	discovery := internal.NewDiscovery(etcdClient)
 	handler := internal.NewHandler(discovery, redisClient, dbClient)
 

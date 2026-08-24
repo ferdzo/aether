@@ -29,7 +29,7 @@ func NewDB(dbPath string) (*DB, error) {
 		return nil, err
 	}
 	// Limit connections to avoid contention
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(4)
 	return &DB{db: db}, nil
 }
 

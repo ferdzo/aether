@@ -36,7 +36,10 @@ func (m *Minio) GetObject(bucket, object string) (*minio.Object, error) {
 }
 
 func (m *Minio) PutObject(bucket, object string, data []byte) error {
-	_, err := m.client.PutObject(context.Background(), bucket, object, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{})
+	// DisableContentSha256 avoids streaming-SigV4 framing that third-party S3 servers may store undecoded.
+	_, err := m.client.PutObject(context.Background(), bucket, object, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{
+		DisableContentSha256: true,
+	})
 	return err
 }
 
@@ -51,4 +54,8 @@ func (m *Minio) EnsureBucket(bucket string) error {
 		}
 	}
 	return nil
+}
+
+func (m *Minio) DeleteObject(bucket, object string) error {
+	return m.client.RemoveObject(context.Background(), bucket, object, minio.RemoveObjectOptions{})
 }

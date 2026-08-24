@@ -26,4 +26,5 @@ type ScalingConfig struct {
 	MinInstances     int
 	MaxInstances     int
 	ScaleToZeroAfter time.Duration
+	WarmWindow       time.Duration // while invoked within this window, a function never drops below MinInstances
 }

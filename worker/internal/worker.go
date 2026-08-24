@@ -54,11 +54,14 @@ type Worker struct {
 	bridgeMgr      *network.BridgeManager
 	instances      map[string][]*Instance
 	functionConfig map[string]FunctionConfig
+	lastInvoked    map[string]time.Time
 	mu             sync.Mutex
 	nextPort       int
 	usedPorts      map[int]bool
 	registry       *Registry
 	codeCache      *CodeCache
+	runtimeCache   *RuntimeCache
+	netnsMgr       *network.NetnsManager
 	redis          *redis.Client
 	consumerName   string
 }
@@ -74,6 +77,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		bridgeMgr:      network.NewBridgeManager(cfg.BridgeName, cfg.BridgeCIDR),
 		instances:      make(map[string][]*Instance),
 		functionConfig: make(map[string]FunctionConfig),
+		lastInvoked:    make(map[string]time.Time),
 		nextPort:       30000,
 		usedPorts:      make(map[int]bool),
 		registry:       registry,
@@ -84,7 +88,9 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if err := w.bridgeMgr.EnsureBridge(); err != nil {
+	if w.netnsMgr != nil {
+		logger.Info("network mode", "mode", "netns")
+	} else if err := w.bridgeMgr.EnsureBridge(); err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
 	}
 
@@ -331,7 +337,17 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	w.mu.Lock()
 	fnCfg := w.functionConfig[functionID]
+	runtimeCache := w.runtimeCache
 	w.mu.Unlock()
+
+	rootfs := w.cfg.RuntimePath
+	if runtimeCache != nil && fnCfg.Runtime != "" {
+		if p, err := runtimeCache.Ensure(fnCfg.Runtime); err != nil {
+			logger.Warn("runtime image unavailable, using configured rootfs", "runtime", fnCfg.Runtime, "error", err)
+		} else {
+			rootfs = p
+		}
+	}
 
 	vcpu, memMB := fnCfg.VCPU, fnCfg.MemMB
 	if vcpu == 0 {
@@ -355,7 +371,7 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
-		RuntimePath:  w.cfg.RuntimePath,
+		RuntimePath:  rootfs,
 		CodePath:     codePath,
 		SocketPath:   filepath.Join(w.cfg.SocketDir, instance.ID+".sock"),
 		VCPUCount:    vcpu,
@@ -370,6 +386,10 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	}
 
 	instance.SetVMDeathCallback(w.handleVMDeath)
+	instance.SetOnRequest(w.MarkInvoked)
+	if w.netnsMgr != nil {
+		instance.SetNetnsManager(w.netnsMgr)
+	}
 
 	w.mu.Lock()
 	proxyPort := w.allocatePort()
@@ -431,6 +451,24 @@ func (w *Worker) GetInstances(functionID string) ([]*Instance, bool) {
 	instances, ok := w.instances[functionID]
 	return instances, ok && len(instances) > 0
 }
+
+// MarkInvoked feeds the scaler's warm window: recently invoked functions keep MinInstances.
+func (w *Worker) MarkInvoked(functionID string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lastInvoked[functionID] = time.Now()
+}
+
+func (w *Worker) LastInvoked(functionID string) (time.Time, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	t, ok := w.lastInvoked[functionID]
+	return t, ok
+}
+
+func (w *Worker) SetRuntimeCache(rc *RuntimeCache) { w.runtimeCache = rc }
+
+func (w *Worker) SetNetnsManager(m *network.NetnsManager) { w.netnsMgr = m }
 
 func (w *Worker) InstanceCount(functionID string) int {
 	w.mu.Lock()

@@ -31,11 +31,34 @@ func (s *Scaler) Run(ctx context.Context) {
 
 func (s *Scaler) check() {
 	s.worker.mu.Lock()
-	defer s.worker.mu.Unlock()
-
 	for functionID, instances := range s.worker.instances {
 		s.checkFunction(functionID, instances)
 	}
+
+	// Drop invocation records for functions that are gone and cold.
+	for functionID, last := range s.worker.lastInvoked {
+		if _, live := s.worker.instances[functionID]; live {
+			continue
+		}
+		if time.Since(last) > s.cfg.WarmWindow+s.cfg.ScaleToZeroAfter {
+			delete(s.worker.lastInvoked, functionID)
+		}
+	}
+	s.worker.mu.Unlock()
+}
+
+// shouldScaleToZero: everything idle past ScaleToZeroAfter AND the function
+// outside its warm window — recently invoked functions hold MinInstances.
+func (s *Scaler) shouldScaleToZero(functionID string, totalActive int64, minIdleDuration time.Duration) bool {
+	if s.cfg.ScaleToZeroAfter <= 0 || totalActive != 0 || minIdleDuration <= s.cfg.ScaleToZeroAfter {
+		return false
+	}
+	if s.cfg.WarmWindow > 0 {
+		if last, ok := s.worker.LastInvoked(functionID); ok && time.Since(last) < s.cfg.WarmWindow {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Scaler) checkFunction(functionID string, instances []*Instance) {
@@ -65,7 +88,7 @@ func (s *Scaler) checkFunction(functionID string, instances []*Instance) {
 	}
 
 	// Scale to zero: if ALL instances idle for ScaleToZeroAfter, kill everything
-	if s.cfg.ScaleToZeroAfter > 0 && totalActive == 0 && minIdleDuration > s.cfg.ScaleToZeroAfter {
+	if s.shouldScaleToZero(functionID, totalActive, minIdleDuration) {
 		logger.Info("scaling to zero", "function", functionID, "instances", len(instances), "idle_for", minIdleDuration)
 		for _, inst := range instances {
 			instID := inst.ID
