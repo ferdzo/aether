@@ -27,17 +27,14 @@ services:
     networks:
       - aether
 
-  minio:
-    image: minio/minio:latest
+  fs:
+    image: ghcr.io/ferdzo/fs:latest
     ports:
-      - 9000:9000
-      - 9001:9001
+      - 2600:2600
     volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
+      - fs_data:/data
     environment:
-      - MINIO_ROOT_USER=aether
-      - MINIO_ROOT_PASSWORD=Aether123
+      - FS_AUTH_ENABLED=false
     networks:
       - aether
 
@@ -112,7 +109,7 @@ services:
 volumes:
   redis_data:
   etcd_data:
-  minio_data:
+  fs_data:
   loki_data:
   tempo_data:
   grafana_data:
