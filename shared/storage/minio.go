@@ -55,3 +55,7 @@ func (m *Minio) EnsureBucket(bucket string) error {
 	}
 	return nil
 }
+
+func (m *Minio) DeleteObject(bucket, object string) error {
+	return m.client.RemoveObject(context.Background(), bucket, object, minio.RemoveObjectOptions{})
+}

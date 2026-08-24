@@ -2,9 +2,14 @@ package functions
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
+	"strconv"
+	"strings"
 
 	"aether/shared/builder"
 	"aether/shared/db"
@@ -17,31 +22,55 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const codeBucket = "function-code"
+const (
+	codeBucket    = "function-code"
+	maxUploadSize = 50 << 20
+)
 
 type FunctionsAPI struct {
-	db    *db.DB
-	minio *storage.Minio
-	redis *redis.Client
+	db        *db.DB
+	minio     *storage.Minio
+	redis     *redis.Client
+	loki      *LokiClient
+	authToken string
 }
 
-func NewFunctionsAPI(database *db.DB, minio *storage.Minio, redisClient *redis.Client) *FunctionsAPI {
+func NewFunctionsAPI(database *db.DB, minio *storage.Minio, redisClient *redis.Client, loki *LokiClient, authToken string) *FunctionsAPI {
 	return &FunctionsAPI{
-		db:    database,
-		minio: minio,
-		redis: redisClient,
+		db:        database,
+		minio:     minio,
+		redis:     redisClient,
+		loki:      loki,
+		authToken: authToken,
 	}
 }
 
 func (api *FunctionsAPI) Routes() chi.Router {
 	r := chi.NewRouter()
-	r.Get("/", api.List)
-	r.Post("/", api.Create)
-	r.Get("/{id}", api.Get)
-	r.Put("/{id}", api.Update)
-	r.Delete("/{id}", api.Delete)
-	r.Post("/{id}/code", api.UploadCode)
-	r.Get("/{id}/invocations", api.GetInvocations)
+
+	// When AUTH_TOKEN is set, every management call must present it as a
+	// bearer token; unset keeps the homelab-open behavior.
+	requireAuth := func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if api.authToken != "" {
+				token, ok := strings.CutPrefix(req.Header.Get("Authorization"), "Bearer ")
+				if !ok || subtle.ConstantTimeCompare([]byte(token), []byte(api.authToken)) != 1 {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+			}
+			next(w, req)
+		}
+	}
+
+	r.Get("/", requireAuth(api.List))
+	r.Post("/", requireAuth(api.Create))
+	r.Get("/{id}", requireAuth(api.Get))
+	r.Put("/{id}", requireAuth(api.Update))
+	r.Delete("/{id}", requireAuth(api.Delete))
+	r.Post("/{id}/code", requireAuth(api.UploadCode))
+	r.Get("/{id}/invocations", requireAuth(api.GetInvocations))
+	r.Get("/{id}/logs", requireAuth(api.Logs))
 	return r
 }
 
@@ -209,6 +238,17 @@ func (api *FunctionsAPI) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remove the stored code image and tell workers to stop live instances
+	// and drop their cached copies. Best-effort: DB row is already gone.
+	if fn.CodePath != "" {
+		if err := api.minio.DeleteObject(codeBucket, fn.CodePath); err != nil {
+			logger.Warn("failed to delete function artifact", "function", fnID, "path", fn.CodePath, "error", err)
+		}
+	}
+	if err := api.redis.Publish(context.Background(), protocol.ChannelCodeUpdate, fnID).Err(); err != nil {
+		logger.Warn("failed to publish function removal event", "function", fnID, "error", err)
+	}
+
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -227,20 +267,31 @@ func (api *FunctionsAPI) UploadCode(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // 1. Read uploaded archive (zip or tar.gz)
-    archiveData, err := io.ReadAll(r.Body)
-    if err != nil {
-        logger.Error("failed to read archive", "error", err)
-        http.Error(w, "failed to read archive", http.StatusInternalServerError)
-        return
-    }
-    defer r.Body.Close()
+	// 1. Read uploaded archive (zip or tar.gz), capped to maxUploadSize.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
+	archiveData, err := io.ReadAll(r.Body)
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			http.Error(w, "upload exceeds size limit", http.StatusRequestEntityTooLarge)
+			return
+		}
+		logger.Error("failed to read archive", "error", err)
+		http.Error(w, "failed to read archive", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
 
-    // 2. Get filename from Content-Disposition or default to .zip
-    filename := r.Header.Get("X-Filename")
-    if filename == "" {
-        filename = "code.zip"
-    }
+	// 2. Get filename from X-Filename header, rejecting path tricks before
+	// the archive type ever reaches the ext4 builder.
+	filename := r.Header.Get("X-Filename")
+	if filename == "" {
+		filename = "code.zip"
+	}
+	if filepath.Base(filename) != filename || filename == "." || filename == string(filepath.Separator) {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
 
     // 3. Build ext4 image from archive
     ext4Data, err := builder.BuildFromArchive(archiveData, filename)
@@ -303,3 +354,32 @@ func (api *FunctionsAPI) GetInvocations(w http.ResponseWriter, r *http.Request) 
 	json.NewEncoder(w).Encode(invocations)
 }
 
+
+// GET /api/functions/{id}/logs?since=1h&limit=200
+func (api *FunctionsAPI) Logs(w http.ResponseWriter, r *http.Request) {
+	fnID := chi.URLParam(r, "id")
+	if api.loki == nil {
+		http.Error(w, "log storage not configured", http.StatusNotImplemented)
+		return
+	}
+
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	lines, err := api.loki.FunctionLogs(r.Context(), fnID, r.URL.Query().Get("since"), limit)
+	if err != nil {
+		logger.Error("failed to fetch function logs", "function", fnID, "error", err)
+		http.Error(w, "failed to fetch logs", http.StatusBadGateway)
+		return
+	}
+	if lines == nil {
+		lines = []LogLine{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(lines)
+}

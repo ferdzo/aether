@@ -111,7 +111,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client())
+	lokiURL := os.Getenv("LOKI_URL")
+	if lokiURL == "" {
+		lokiURL = "http://localhost:3100"
+	}
+	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client(), functions.NewLokiClient(lokiURL), os.Getenv("AUTH_TOKEN"))
 	discovery := internal.NewDiscovery(etcdClient)
 	handler := internal.NewHandler(discovery, redisClient, dbClient)
 
