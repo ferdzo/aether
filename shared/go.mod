@@ -6,9 +6,13 @@ toolchain go1.24.11
 
 require (
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
+	github.com/lmittmann/tint v1.1.2
 	github.com/mattn/go-sqlite3 v1.14.33
 	github.com/minio/minio-go/v7 v7.0.98
+	github.com/prometheus/client_golang v1.23.2
 	github.com/rs/xid v1.6.0
+	github.com/vishvananda/netlink v1.3.1
+	github.com/vishvananda/netns v0.0.5
 	go.opentelemetry.io/otel v1.39.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.15.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.39.0
@@ -51,7 +55,6 @@ require (
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.11 // indirect
 	github.com/klauspost/crc32 v1.3.0 // indirect
-	github.com/lmittmann/tint v1.1.2 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/minio/crc64nvme v1.1.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
@@ -61,14 +64,11 @@ require (
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
 	github.com/tinylib/msgp v1.6.1 // indirect
-	github.com/vishvananda/netlink v1.1.1-0.20210330154013-f5de75959ad5 // indirect
-	github.com/vishvananda/netns v0.0.0-20210104183010-2eb08e3e575f // indirect
 	go.mongodb.org/mongo-driver v1.8.3 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.39.0 // indirect
