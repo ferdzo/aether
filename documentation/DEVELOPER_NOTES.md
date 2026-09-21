@@ -1,3 +1,50 @@
+> ## ⚠️ Historical document — not authoritative
+>
+> This file was written before the P0–P3 work (reliability fixes, generic drives,
+> the guest supervisor, and the process-job path). It records how the system was
+> built at the time and **describes behaviour that has since changed**. The body
+> below is left intact as history; where it conflicts with the code or with the
+> documents below, the code and those documents win.
+>
+> - **Design direction:** [`ARCHITECTURE.md`](ARCHITECTURE.md)
+> - **Current implementation state:** [`CONTEXT.md`](CONTEXT.md)
+
+### Known stale sections
+
+- **Job queue consumer ("Job Queue Consumer", "Why Redis Queue").** Describes
+  `BLPOP` on the Redis list `queue:vm_provision`. The worker now reads the Redis
+  Stream `stream:vm_provision` via consumer group `aether-workers`
+  (`XReadGroup`), ACKs on success, and reclaims stale pending entries with
+  `XPendingExt`/`XClaim` (`worker/internal/worker.go`,
+  `shared/protocol/messages.go`). There is no list.
+- **`SpawnInstance` ("Spawning an Instance").** Still accurate for HTTP
+  functions — `WaitReady` + `StartProxy` + etcd registration — but it is no
+  longer the only path. `handleJob` dispatches `Job.Mode == "process"` to
+  `startJob`, which deliberately skips readiness, the proxy, instance
+  registration and the scaler (`worker/internal/worker.go`,
+  `worker/internal/job.go`).
+- **Guest `/init` and `aether-env` (the MMDS section and the "Init Script"
+  walkthrough).** The implied env-var/token behaviour changed: a boot token now
+  makes metadata fetch mandatory — `init/main.go` fails closed (bounded retries,
+  3 attempts × 5s) instead of falling back to `handler.js`; MMDS also carries
+  `dns` (written to `/etc/resolv.conf`) plus `entrypoint`/`port`; and there is now
+  a `process` mode whose supervisor forks/waits, emits
+  `AETHER_EXIT:<nonce>:<code>`, and resets the VM with `reboot -f`.
+- **MMDS "SetMetadata must be called after Start".** Still true, but the payload
+  now also carries `dns`, and an offline job (`NET_MODE=none`) sends **no MMDS
+  and no boot token at all** because it has no NIC to serve it
+  (`worker/internal/worker.go` `startJob`/`jobExitNonce`).
+- **"Project Structure".** Predates the added packages:
+  `worker/internal/job.go`, `worker/internal/workspace.go`,
+  `worker/internal/runtime_cache.go`, and `shared/metrics`; scripts
+  `scripts/build-job-rootfs.sh` and `scripts/test-guest-egress.sh` are missing.
+  (Checked against the working tree.)
+- **"Future Improvements" / earlier "invocation logging" wording.** Some items
+  have since landed: invocation records are written
+  (`gateway/internal/router.go` → `db.CreateInvocation`), and a Prometheus
+  `/metrics` endpoint plus OTel traces/logs exist. Treat the list as historical
+  intent, not a current gap list.
+
 # Aether Developer Notes
 
 Internal documentation on implementation details and design decisions.
