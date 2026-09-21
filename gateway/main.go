@@ -12,6 +12,7 @@ import (
 
 	"aether/gateway/functions"
 	"aether/gateway/internal"
+	"aether/gateway/jobs"
 	"aether/shared/db"
 	"aether/shared/logger"
 	"aether/shared/metrics"
@@ -116,6 +117,7 @@ func main() {
 		lokiURL = "http://localhost:3100"
 	}
 	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client(), functions.NewLokiClient(lokiURL), os.Getenv("AUTH_TOKEN"))
+	jobsAPI := jobs.NewJobsAPI(redisClient, etcdClient, os.Getenv("AUTH_TOKEN"))
 	discovery := internal.NewDiscovery(etcdClient)
 	handler := internal.NewHandler(discovery, redisClient, dbClient)
 
@@ -124,6 +126,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.HandleFunc("/functions/{funcID}/*", handler.Handler)
 	r.Mount("/api/functions", functionsAPI.Routes())
+	r.Mount("/api/jobs", jobsAPI.Routes())
 	r.Handle("/metrics", metrics.Handler())
 
 	go func() {
