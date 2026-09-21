@@ -54,6 +54,7 @@ type Worker struct {
 	vmMgr          *vm.Manager
 	bridgeMgr      *network.BridgeManager
 	instances      map[string][]*Instance
+	executions     map[string]*Execution
 	functionConfig map[string]FunctionConfig
 	lastInvoked    map[string]time.Time
 	mu             sync.Mutex
@@ -83,6 +84,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		vmMgr:          vm.NewManager(cfg.FirecrackerBin),
 		bridgeMgr:      network.NewBridgeManager(cfg.BridgeName, cfg.BridgeCIDR),
 		instances:      make(map[string][]*Instance),
+		executions:     make(map[string]*Execution),
 		functionConfig: make(map[string]FunctionConfig),
 		lastInvoked:    make(map[string]time.Time),
 		nextPort:       30000,
@@ -431,6 +433,13 @@ func (w *Worker) handleJob(ctx context.Context, job []byte) error {
 	// asynchronously by startJob; only the spawn itself decides the ACK.
 	if jobData.Mode == jobModeProcess {
 		return w.startJob(ctx, jobData)
+	}
+
+	// Persistent executions (long-lived guest exec service over vsock) are
+	// dispatched the same way: one microVM serving many execs. ACK-at-readiness,
+	// never registered in w.instances.
+	if jobData.Mode == protocol.ExecutionMode {
+		return w.startExecution(ctx, jobData)
 	}
 
 	w.mu.Lock()
@@ -1072,6 +1081,8 @@ func (w *Worker) Shutdown() error {
 		logger.Info("stopping instance", "function", inst.FunctionID, "instance", inst.ID)
 		w.cleanupInstance(inst.FunctionID, inst)
 	}
+
+	w.destroyAllExecutions()
 
 	return nil
 }

@@ -39,6 +39,8 @@ func readEnv() *internal.Config {
 		StreamMaxLen:   envInt64("STREAM_MAX_LEN", 1000),
 		WorkspaceDir:   envString("WORKSPACE_DIR", "/var/aether/workspaces"),
 		WorkspaceTTL:   envDuration("WORKSPACE_TTL", 24*time.Hour),
+		ControlPort:    envInt("WORKER_CONTROL_PORT", 9091),
+		ControlToken:   strings.TrimSpace(os.Getenv("WORKER_CONTROL_TOKEN")),
 		FunctionPort: func() int {
 			val := os.Getenv("FUNCTION_PORT")
 			if val == "" {
@@ -228,6 +230,15 @@ func main() {
 	worker := internal.NewWorker(config, registry, codeCache, redisClient)
 	worker.SetRuntimeCache(runtimeCache)
 
+	// Worker control API for executions: the gateway dials WorkerAddr (worker
+	// IP + control port) to exec and destroy. Started before the queue loop so
+	// a freshly created execution is reachable as soon as it is recorded ready.
+	control := internal.NewControlServer(worker, config.ControlToken)
+	if err := control.Start(":" + strconv.Itoa(config.ControlPort)); err != nil {
+		logger.Error("Error starting worker control API", "error", err)
+		os.Exit(1)
+	}
+
 	networkMode := os.Getenv("NET_MODE")
 	if networkMode == "" {
 		networkMode = "bridge"
@@ -293,5 +304,10 @@ func main() {
 	}
 
 	worker.Shutdown()
+	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer scancel()
+	if err := control.Shutdown(sctx); err != nil {
+		logger.Warn("control API shutdown incomplete", "error", err)
+	}
 	os.Exit(0)
 }
