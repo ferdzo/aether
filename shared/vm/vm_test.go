@@ -2,6 +2,8 @@ package vm
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -72,5 +74,119 @@ func TestWaitNilMachineIsSafe(t *testing.T) {
 
 	if err := v.Wait(); err == nil {
 		t.Fatal("Wait() with nil Machine: got nil error, want error")
+	}
+}
+
+// writeTempDrive creates a real file so buildDrives' existence check passes.
+func writeTempDrive(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "drive.ext4")
+	if err := os.WriteFile(path, []byte("data"), 0o600); err != nil {
+		t.Fatalf("write temp drive: %v", err)
+	}
+	return path
+}
+
+func TestBuildDrivesRootOnly(t *testing.T) {
+	drives, err := buildDrives(Config{RootFSPath: "/rootfs.ext4"})
+	if err != nil {
+		t.Fatalf("buildDrives: %v", err)
+	}
+	if len(drives) != 1 {
+		t.Fatalf("got %d drives, want 1", len(drives))
+	}
+	root := drives[0]
+	if got := *root.DriveID; got != "rootfs" {
+		t.Errorf("root DriveID = %q, want %q", got, "rootfs")
+	}
+	if got := *root.PathOnHost; got != "/rootfs.ext4" {
+		t.Errorf("root PathOnHost = %q, want %q", got, "/rootfs.ext4")
+	}
+	if !*root.IsRootDevice {
+		t.Error("root IsRootDevice = false, want true")
+	}
+	if *root.IsReadOnly {
+		t.Error("root IsReadOnly = true, want false by default")
+	}
+}
+
+func TestBuildDrivesRootReadOnly(t *testing.T) {
+	drives, err := buildDrives(Config{RootFSPath: "/rootfs.ext4", RootFSReadOnly: true})
+	if err != nil {
+		t.Fatalf("buildDrives: %v", err)
+	}
+	if len(drives) != 1 {
+		t.Fatalf("got %d drives, want 1", len(drives))
+	}
+	if !*drives[0].IsReadOnly {
+		t.Error("root IsReadOnly = false, want true")
+	}
+}
+
+func TestBuildDrivesOrderAndFlags(t *testing.T) {
+	first := writeTempDrive(t)
+	second := writeTempDrive(t)
+
+	drives, err := buildDrives(Config{
+		RootFSPath: "/rootfs.ext4",
+		Drives: []DriveSpec{
+			{Path: first, ReadOnly: true},
+			{Path: second, ReadOnly: false},
+		},
+	})
+	if err != nil {
+		t.Fatalf("buildDrives: %v", err)
+	}
+	if len(drives) != 3 {
+		t.Fatalf("got %d drives, want 3", len(drives))
+	}
+
+	if !*drives[0].IsRootDevice {
+		t.Error("drives[0] IsRootDevice = false, want true")
+	}
+	if *drives[1].IsRootDevice || *drives[2].IsRootDevice {
+		t.Error("non-root drive marked IsRootDevice = true")
+	}
+
+	if got := *drives[1].PathOnHost; got != first {
+		t.Errorf("drives[1] path = %q, want %q (order not preserved)", got, first)
+	}
+	if got := *drives[2].PathOnHost; got != second {
+		t.Errorf("drives[2] path = %q, want %q (order not preserved)", got, second)
+	}
+	if !*drives[1].IsReadOnly {
+		t.Error("drives[1] IsReadOnly = false, want true")
+	}
+	if *drives[2].IsReadOnly {
+		t.Error("drives[2] IsReadOnly = true, want false")
+	}
+
+	ids := map[string]bool{}
+	for _, d := range drives {
+		if ids[*d.DriveID] {
+			t.Errorf("duplicate DriveID %q", *d.DriveID)
+		}
+		ids[*d.DriveID] = true
+	}
+}
+
+func TestBuildDrivesMissingPathErrors(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist.ext4")
+	_, err := buildDrives(Config{
+		RootFSPath: "/rootfs.ext4",
+		Drives:     []DriveSpec{{Path: missing, ReadOnly: true}},
+	})
+	if err == nil {
+		t.Fatal("buildDrives with missing drive path: got nil error, want error")
+	}
+}
+
+func TestBuildDrivesEmptyPathErrors(t *testing.T) {
+	_, err := buildDrives(Config{
+		RootFSPath: "/rootfs.ext4",
+		Drives:     []DriveSpec{{Path: "", ReadOnly: true}},
+	})
+	if err == nil {
+		t.Fatal("buildDrives with empty drive path: got nil error, want error")
 	}
 }

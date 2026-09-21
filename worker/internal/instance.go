@@ -69,7 +69,7 @@ type Instance struct {
 type InstanceConfig struct {
 	KernelPath   string
 	RuntimePath  string
-	CodePath     string
+	Drives       []vm.DriveSpec
 	SocketPath   string
 	VCPUCount    int64
 	MemSizeMB    int64
@@ -193,7 +193,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	vmCfg := vm.Config{
 		KernelPath:    cfg.KernelPath,
 		RootFSPath:    cfg.RuntimePath,
-		CodeDrivePath: cfg.CodePath,
+		Drives:        cfg.Drives,
 		SocketPath:    cfg.SocketPath,
 		VCPUCount:     cfg.VCPUCount,
 		MemSizeMB:     cfg.MemSizeMB,
@@ -214,7 +214,7 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	i.socketPath = cfg.SocketPath
 	i.mu.Unlock()
 
-	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "code_path", cfg.CodePath)
+	log.Debug("launching VM", "vcpu", cfg.VCPUCount, "memory_mb", cfg.MemSizeMB, "drives", len(cfg.Drives))
 	vmInstance, err := i.vmMgr.Launch(vmCfg)
 	if err != nil {
 		i.rollbackNetwork()
