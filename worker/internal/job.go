@@ -40,6 +40,12 @@ const (
 	// jobStopGrace bounds how long Run waits for the VM process to exit after
 	// Stop is called, so a wedged VMM cannot block the runner forever.
 	jobStopGrace = 5 * time.Second
+
+	// jobHeartbeatInterval is how often a running job's durable record is
+	// refreshed. Heartbeats only *enable* stale detection — a record whose
+	// HeartbeatAt stops advancing belongs to a dead worker. No reconciler
+	// consumes them yet; this is deliberately just the observability half.
+	jobHeartbeatInterval = 30 * time.Second
 )
 
 // jobLog is the bounded console sink for a job VM. It is an io.Writer that
@@ -219,6 +225,15 @@ type JobRunnerConfig struct {
 	// Record persists the final record. Optional; a failure is logged and never
 	// changes the run's outcome.
 	Record func(protocol.JobRecord) error
+
+	// HeartbeatInterval is how often the running record is refreshed while the
+	// job runs. <= 0 disables heartbeats. It is injected so tests can shorten
+	// it; production passes jobHeartbeatInterval.
+	HeartbeatInterval time.Duration
+	// Heartbeat persists a running record with a refreshed HeartbeatAt.
+	// Optional and best-effort: a failure is logged and never changes the run's
+	// outcome nor the stream ACK.
+	Heartbeat func(protocol.JobRecord) error
 }
 
 // JobRunner runs one process job to completion and classifies its outcome.
@@ -233,7 +248,9 @@ type JobRunner struct {
 	wait func() error
 	stop func() error
 
-	record func(protocol.JobRecord) error
+	record            func(protocol.JobRecord) error
+	heartbeat         func(protocol.JobRecord) error
+	heartbeatInterval time.Duration
 }
 
 // NewJobRunner builds a runner. The provided sink's nonce is aligned with the
@@ -255,6 +272,9 @@ func NewJobRunner(cfg JobRunnerConfig) *JobRunner {
 		wait:      cfg.Wait,
 		stop:      cfg.Stop,
 		record:    cfg.Record,
+
+		heartbeat:         cfg.Heartbeat,
+		heartbeatInterval: cfg.HeartbeatInterval,
 	}
 }
 
@@ -273,7 +293,11 @@ func (r *JobRunner) Run(ctx context.Context) protocol.JobRecord {
 	}
 
 	started := time.Now().UTC()
+	stopHeartbeat := r.startHeartbeat(ctx, started)
 	waitErr, timedOut := r.waitForExit(ctx)
+	// Stop (and wait for) the heartbeat before writing the terminal record, so a
+	// late heartbeat can never clobber it back to running.
+	stopHeartbeat()
 
 	state, exitCode, errMsg := classifyJob(jobOutcome{
 		SentinelSeen: r.log.SentinelSeen(),
@@ -282,16 +306,18 @@ func (r *JobRunner) Run(ctx context.Context) protocol.JobRecord {
 		WaitErr:      waitErr,
 	})
 
+	finished := time.Now().UTC()
 	rec := protocol.JobRecord{
-		JobID:      r.jobID,
-		RequestID:  r.requestID,
-		Mode:       jobModeProcess,
-		State:      state,
-		ExitCode:   exitCode,
-		WorkerID:   r.workerID,
-		Error:      errMsg,
-		StartedAt:  started,
-		FinishedAt: time.Now().UTC(),
+		JobID:       r.jobID,
+		RequestID:   r.requestID,
+		Mode:        jobModeProcess,
+		State:       state,
+		ExitCode:    exitCode,
+		WorkerID:    r.workerID,
+		Error:       errMsg,
+		StartedAt:   started,
+		HeartbeatAt: finished,
+		FinishedAt:  finished,
 	}
 
 	if r.record != nil {
@@ -301,6 +327,54 @@ func (r *JobRunner) Run(ctx context.Context) protocol.JobRecord {
 	}
 
 	return rec
+}
+
+// startHeartbeat refreshes the running record on a ticker until the returned
+// stop function is called. The stop function waits for the goroutine to exit,
+// so no heartbeat write can land after the terminal record. Heartbeats are
+// best-effort: a failed write is logged and never affects the job or its ACK.
+//
+// This only *enables* stale detection — a running record whose HeartbeatAt
+// stops advancing is a dead worker's. No reconciler consumes it yet.
+func (r *JobRunner) startHeartbeat(ctx context.Context, started time.Time) func() {
+	if r.heartbeat == nil || r.heartbeatInterval <= 0 {
+		return func() {}
+	}
+
+	ticker := time.NewTicker(r.heartbeatInterval)
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				rec := protocol.JobRecord{
+					JobID:       r.jobID,
+					RequestID:   r.requestID,
+					Mode:        jobModeProcess,
+					State:       protocol.JobStateRunning,
+					WorkerID:    r.workerID,
+					StartedAt:   started,
+					HeartbeatAt: time.Now().UTC(),
+				}
+				if err := r.heartbeat(rec); err != nil {
+					logger.Warn("failed to record job heartbeat", "job_id", r.jobID, "error", err)
+				}
+			}
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 // waitForExit races Wait against the timeout and the context.

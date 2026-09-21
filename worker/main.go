@@ -35,6 +35,8 @@ func readEnv() *internal.Config {
 		BridgeCIDR:     os.Getenv("BRIDGE_CIDR"),
 		MinioBucket:    os.Getenv("MINIO_BUCKET"),
 		GuestDNS:       parseGuestDNS(os.Getenv("GUEST_DNS")),
+		MaxDeliveries:  envInt("JOB_MAX_DELIVERIES", 5),
+		StreamMaxLen:   envInt64("STREAM_MAX_LEN", 1000),
 		FunctionPort: func() int {
 			val := os.Getenv("FUNCTION_PORT")
 			if val == "" {
@@ -47,6 +49,33 @@ func readEnv() *internal.Config {
 			return port
 		}(),
 	}
+}
+
+// envInt reads an integer env var, returning def when it is unset or invalid.
+// An explicit "0" is honoured (the knobs it feeds treat 0 as "disabled").
+func envInt(name string, def int) int {
+	val := os.Getenv(name)
+	if val == "" {
+		return def
+	}
+	n, err := strconv.Atoi(val)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+// envInt64 is envInt for int64 knobs.
+func envInt64(name string, def int64) int64 {
+	val := os.Getenv(name)
+	if val == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return def
+	}
+	return n
 }
 
 // defaultGuestDNS is used when GUEST_DNS is unset. The host's own resolver

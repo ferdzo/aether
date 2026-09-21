@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -153,7 +154,16 @@ var (
 	staleClaimCheckEvery = 30 * time.Second
 	staleClaimAfter      = 70 * time.Second // MUST exceed max spawn time (~30s WaitReady) or booting VMs get double-spawned
 	staleClaimBatchSize  = int64(10)
+	// dlqScanBatchSize bounds how many pending entries the delivery-cap pass
+	// inspects per tick.
+	dlqScanBatchSize = int64(100)
 )
+
+// dlqAdd writes one entry to the dead-letter stream. It is a seam so tests can
+// exercise the write-failure path, which must leave the source entry pending.
+var dlqAdd = func(ctx context.Context, client *redis.Client, values map[string]interface{}) (string, error) {
+	return client.XAdd(ctx, &redis.XAddArgs{Stream: protocol.StreamProvisionDLQ, Values: values}).Result()
+}
 
 func (w *Worker) claimStaleJobs(ctx context.Context) {
 	ticker := time.NewTicker(staleClaimCheckEvery)
@@ -166,7 +176,127 @@ func (w *Worker) claimStaleJobs(ctx context.Context) {
 		case <-ticker.C:
 		}
 
+		// Order matters: shed exhausted entries before the reaper re-claims
+		// them, then reclaim stale entries, then bound the stream.
+		w.moveExhaustedToDLQ(ctx)
 		w.claimOnce(ctx)
+		w.trimStream(ctx)
+	}
+}
+
+// maxDeliveries returns the configured delivery cap; <= 0 disables it.
+func (w *Worker) maxDeliveries() int {
+	if w.cfg == nil {
+		return 0
+	}
+	return w.cfg.MaxDeliveries
+}
+
+// streamMaxLen returns the configured approximate stream bound; <= 0 disables.
+func (w *Worker) streamMaxLen() int64 {
+	if w.cfg == nil {
+		return 0
+	}
+	return w.cfg.StreamMaxLen
+}
+
+// moveExhaustedToDLQ is the bounded poison-entry escape hatch. It is a separate
+// pass alongside claimOnce: XPENDING exposes the per-entry delivery count but
+// cannot filter by it, so the count is filtered client-side. Entries whose
+// delivery count has exceeded the cap are copied to the DLQ and ACKed so they
+// stop looping; a DLQ write failure leaves the entry pending so it retries.
+func (w *Worker) moveExhaustedToDLQ(ctx context.Context) {
+	max := w.maxDeliveries()
+	if max <= 0 {
+		return
+	}
+
+	pending, err := w.redis.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: protocol.StreamProvision,
+		Group:  protocol.StreamGroup,
+		Idle:   staleClaimAfter,
+		Start:  "-",
+		End:    "+",
+		Count:  dlqScanBatchSize,
+	}).Result()
+	if err != nil {
+		if ctx.Err() == nil && err != redis.Nil {
+			logger.Error("failed to inspect pending entries for delivery cap", "error", err)
+		}
+		return
+	}
+
+	ids := make([]string, 0, len(pending))
+	counts := make(map[string]int64, len(pending))
+	for _, p := range pending {
+		if p.RetryCount > int64(max) {
+			ids = append(ids, p.ID)
+			counts[p.ID] = p.RetryCount
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+
+	// Claim before moving: this takes ownership (so a peer's reaper cannot race
+	// us to the same entry) and returns the original payload in one round trip.
+	msgs, err := w.redis.XClaim(ctx, &redis.XClaimArgs{
+		Stream:   protocol.StreamProvision,
+		Group:    protocol.StreamGroup,
+		Consumer: w.consumerName,
+		MinIdle:  staleClaimAfter,
+		Messages: ids,
+	}).Result()
+	if err != nil {
+		logger.Error("failed to claim exhausted entries", "error", err)
+		return
+	}
+
+	for _, msg := range msgs {
+		w.dlqMessage(ctx, msg, counts[msg.ID])
+	}
+}
+
+// dlqMessage copies msg to the DLQ and ACKs it. On a DLQ write failure the
+// source entry is deliberately left pending (and unacked) so a later pass
+// retries the move.
+func (w *Worker) dlqMessage(ctx context.Context, msg redis.XMessage, deliveries int64) {
+	values := map[string]interface{}{
+		"original_id": msg.ID,
+		"deliveries":  strconv.FormatInt(deliveries, 10),
+		"reason":      "max deliveries exceeded",
+	}
+	if raw, ok := msg.Values["job"].(string); ok {
+		values["job"] = raw
+	} else if encoded, err := json.Marshal(msg.Values); err == nil {
+		values["job"] = string(encoded)
+	}
+
+	if _, err := dlqAdd(ctx, w.redis, values); err != nil {
+		logger.Error("failed to write DLQ entry, leaving pending", "message_id", msg.ID, "error", err)
+		return
+	}
+	logger.Warn("moved poison entry to DLQ", "message_id", msg.ID, "deliveries", deliveries)
+	w.ackMessage(ctx, msg.ID)
+}
+
+// trimStream bounds the provision stream with an approximate XTRIM so acked
+// entries do not accumulate forever. The DLQ is deliberately never trimmed.
+func (w *Worker) trimStream(ctx context.Context) {
+	max := w.streamMaxLen()
+	if max <= 0 {
+		return
+	}
+
+	trimmed, err := w.redis.XTrimMaxLenApprox(ctx, protocol.StreamProvision, max, 0).Result()
+	if err != nil {
+		if ctx.Err() == nil {
+			logger.Error("failed to trim provision stream", "error", err)
+		}
+		return
+	}
+	if trimmed > 0 {
+		logger.Debug("trimmed provision stream", "removed", trimmed, "max_len", max)
 	}
 }
 
@@ -551,13 +681,15 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		return fail(fmt.Errorf("failed to start job instance: %w", err))
 	}
 
+	started := time.Now().UTC()
 	running := protocol.JobRecord{
-		JobID:     jobID,
-		RequestID: job.RequestID,
-		Mode:      jobModeProcess,
-		State:     protocol.JobStateRunning,
-		WorkerID:  w.workerID(),
-		StartedAt: time.Now().UTC(),
+		JobID:       jobID,
+		RequestID:   job.RequestID,
+		Mode:        jobModeProcess,
+		State:       protocol.JobStateRunning,
+		WorkerID:    w.workerID(),
+		StartedAt:   started,
+		HeartbeatAt: started,
 	}
 	if err := w.registry.PutJob(running); err != nil {
 		// Recording is best-effort: the VM is up and JobRunner will write the
@@ -566,15 +698,17 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 	}
 
 	runner := NewJobRunner(JobRunnerConfig{
-		JobID:     jobID,
-		RequestID: job.RequestID,
-		WorkerID:  w.workerID(),
-		Nonce:     nonce,
-		Timeout:   time.Duration(job.TimeoutSeconds) * time.Second,
-		Log:       console,
-		Wait:      func() error { return <-instance.ExitCh() },
-		Stop:      instance.Stop,
-		Record:    func(rec protocol.JobRecord) error { return w.registry.PutJob(rec) },
+		JobID:             jobID,
+		RequestID:         job.RequestID,
+		WorkerID:          w.workerID(),
+		Nonce:             nonce,
+		Timeout:           time.Duration(job.TimeoutSeconds) * time.Second,
+		Log:               console,
+		Wait:              func() error { return <-instance.ExitCh() },
+		Stop:              instance.Stop,
+		Record:            func(rec protocol.JobRecord) error { return w.registry.PutJob(rec) },
+		HeartbeatInterval: jobHeartbeatInterval,
+		Heartbeat:         func(rec protocol.JobRecord) error { return w.registry.PutJob(rec) },
 	})
 
 	startJobRunner(ctx, runner)
