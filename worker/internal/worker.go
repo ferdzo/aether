@@ -442,6 +442,15 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 	log := logger.With("job_id", jobID, "request_id", job.RequestID)
 	log.Info("received process job", "command", job.Command, "timeout_s", job.TimeoutSeconds)
 
+	// Jobs can be written to the stream directly, bypassing the gateway, so the
+	// id is validated here as well as at the API. It becomes an etcd key suffix
+	// and, when a workspace is requested, a file name. Nothing has been
+	// persisted yet at this point, so there is no marker to clear.
+	if err := protocol.ValidJobID(jobID); err != nil {
+		log.Error("rejecting job with invalid id", "error", err)
+		return fmt.Errorf("invalid job id: %w", err)
+	}
+
 	// Durable guard: a record already running or done means another consumer
 	// owns this job; skip (and ACK). A lookup error (missing record or etcd
 	// unavailable) is not fatal — the in-flight marker is the live guard.
