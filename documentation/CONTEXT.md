@@ -32,6 +32,7 @@ else is marked unverified on purpose.
 |---|---|---|
 | Process job, full path | Real Redis Stream entry → real worker → real microVM running `sh -c 'echo hello; sleep 2; exit 42'` → stdout captured → exit status 42 → durable job record `state=done` → stream ACKed at spawn (`XPENDING 0`). `scripts/e2e-job.sh` | no |
 | Guest networking (bridge) | From inside the guest: `github.com` resolved to an IP and an outbound HTTPS request returned 200. `scripts/test-guest-egress.sh` | yes |
+| MMDS command delivery (bridge) | A bridge-mode job whose rootfs carries no command and no nonce completed with `exit_code=42`, so `mode`/`command`/`timeout_s`/`exit_nonce` had to arrive over MMDS. `scripts/e2e-job-bridge.sh` | yes |
 | netns addressing | Structural test: guest gateway on the in-namespace bridge, TAP attached, host route for the guest /30, `ip_forward=1` in the namespace | yes |
 | Firecracker + kernel | Real boots on Firecracker **v1.17.0**, guest kernel **6.18.48** | — |
 | Ordered drives | Real VM with the `rootfs` device plus an extra read-only drive attached in order | no |
@@ -43,8 +44,6 @@ else is marked unverified on purpose.
   (create → cold start → MMDS → readiness → proxy → scale-down). The pieces are
   implemented and covered by unit tests; the composed path has not been re-run
   recently.
-- **MMDS command delivery** for process jobs that have a NIC. Offline jobs
-  carry their command in the rootfs `/init` instead.
 - Job cancellation.
 
 ## Tech Stack
@@ -165,7 +164,7 @@ rename, with a per-key lock so a key is fetched once under concurrency.
 
 | Feature | Status |
 |---------|--------|
-| **Jobs HTTP API** | Not implemented; jobs are submitted directly to the provision stream |
+| **Jobs HTTP API** | Implemented: `POST /api/jobs` to submit, `GET /api/jobs/{id}` for status and result |
 | **Request timeouts** | No timeout on function invocations |
 | **Health checks** | No periodic instance health monitoring |
 | **Authentication** | Optional bearer token on the management API (`AUTH_TOKEN`); the invocation route and worker proxy ports are unauthenticated |

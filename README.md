@@ -22,14 +22,14 @@ cgroup isolation yet.
 |---|---|---|
 | Process job, full path | A real Redis Stream entry drove the real worker to boot a real microVM running `sh -c 'echo hello; sleep 2; exit 42'`; stdout captured, exit status **42** recorded durably, stream entry ACKed at spawn (`XPENDING 0`). `scripts/e2e-job.sh` | no |
 | Guest networking (bridge) | From **inside** the guest: resolved `github.com` and completed an outbound HTTPS request (200). `scripts/test-guest-egress.sh` | yes |
+| MMDS command delivery (bridge) | A bridge-mode job whose rootfs carries **no** command and **no** nonce still completed with `exit_code=42`, so `mode`/`command`/`timeout_s`/`exit_nonce` must have arrived over MMDS. `scripts/e2e-job-bridge.sh` | yes |
 | netns addressing | Structural lifecycle test (guest gateway on the in-namespace bridge, TAP attached, host route, `ip_forward=1`) | yes |
 | Firecracker + kernel | Real boots on Firecracker **v1.17.0** with guest kernel **6.18.48** | — |
 | Ordered drives | Real VM with `rootfs` plus an extra read-only drive attached in order | no |
 
 **Not verified** (stated plainly rather than implied): the full HTTP function
 path end to end since the recent reliability work (create → cold start → MMDS →
-readiness → proxy → scale-down); MMDS **command** delivery for process jobs with
-a NIC (offline jobs carry their command in the rootfs); job cancellation.
+readiness → proxy → scale-down); job cancellation.
 
 ## How it works
 
@@ -96,7 +96,7 @@ curl http://localhost:8080/functions/{id}/
 
 ## Verifying it works
 
-Two harnesses, both of which run the real thing rather than mocks:
+Three harnesses, all of which run the real thing rather than mocks:
 
 ```bash
 # Process job end to end, NO root needed. Brings up its own Redis and the
@@ -107,6 +107,11 @@ scripts/e2e-job.sh
 # Guest networking, ROOT required (bridge/TAP/NAT). Builds a guest and asserts
 # it can resolve github.com and make an outbound HTTPS request from inside the VM.
 sudo scripts/test-guest-egress.sh
+
+# Process job in BRIDGE mode with a real NIC, ROOT required. Proves MMDS command
+# delivery: the rootfs carries no command and no nonce, so the guest can only
+# run if MMDS supplied both.
+sudo scripts/e2e-job-bridge.sh
 ```
 
 Related:
@@ -129,10 +134,13 @@ scripts/build-runtime.sh <image> <name>      # publish a runtime rootfs to stora
 | `GET /api/functions/{id}/invocations` | Invocation history |
 | `GET /api/functions/{id}/logs` | Function logs (Loki) |
 | `ANY /functions/{id}/*` | Invoke function |
+| `POST /api/jobs` | Submit a process job |
+| `GET /api/jobs/{id}` | Job status and result |
 
-**There is no HTTP API for jobs yet.** A process job is currently submitted by
-writing to the provision stream directly — see `scripts/e2e-job.sh` for the exact
-message shape. A `POST /jobs` / `GET /jobs/{id}` API is the next planned step.
+Jobs are submitted over HTTP: `POST /api/jobs` takes `{runtime, command[],
+timeout_seconds, vcpu, memory_mb, env_vars}` and returns `202` with a job id;
+`GET /api/jobs/{id}` returns the durable record (`state`, `exit_code`, ...).
+`scripts/e2e-job-api.sh` drives that loop against a real microVM.
 
 ## Configuration
 
