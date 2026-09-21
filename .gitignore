@@ -24,6 +24,9 @@ vm_key*
 .vscode/
 *.swp
 
+# OpenCode session state
+.omo/
+
 
 *.db.assets/
 *.zip

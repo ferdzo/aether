@@ -221,7 +221,7 @@ func (w *Worker) processMessage(ctx context.Context, msg redis.XMessage) {
 		return
 	}
 
-	if err := w.handleJob([]byte(raw)); err != nil {
+	if err := w.handleJob(ctx, []byte(raw)); err != nil {
 		logger.Error("job failed, leaving pending for redelivery", "message_id", msg.ID, "error", err)
 		metrics.JobRetriesTotal.Inc()
 		return
@@ -236,13 +236,16 @@ func (w *Worker) ackMessage(ctx context.Context, id string) {
 	}
 }
 
-func (w *Worker) handleJob(job []byte) error {
+func (w *Worker) handleJob(ctx context.Context, job []byte) error {
 	var jobData protocol.Job
 	if err := json.Unmarshal(job, &jobData); err != nil {
 		return fmt.Errorf("failed to unmarshal job: %w", err)
 	}
 
-	ctx := context.Background()
+	// Provisioning is scoped to the caller's context (watchQueue/claimOnce), so
+	// worker shutdown cancels in-flight spawns. Trace context from the job is
+	// extracted into that same ctx. The VM lifetime is owned by vm.Manager and
+	// is deliberately not tied to it.
 	if jobData.TraceContext != nil {
 		carrier := MapCarrier(jobData.TraceContext)
 		ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
@@ -260,10 +263,14 @@ func (w *Worker) handleJob(job []byte) error {
 	log := logger.With("request_id", jobData.RequestID, "function", jobData.FunctionID)
 	log.Info("received job", "count", jobData.Count)
 
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("job cancelled before provisioning: %w", err)
+	}
+
 	w.mu.Lock()
 	port := jobData.Port
 	if port == 0 {
-		port = 3000
+		port = defaultFunctionPort
 	}
 	entrypoint := jobData.Entrypoint
 	if entrypoint == "" {
@@ -298,7 +305,7 @@ func (w *Worker) handleJob(job []byte) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := w.SpawnInstance(jobData.FunctionID); err != nil {
+			if _, err := w.SpawnInstanceContext(ctx, jobData.FunctionID); err != nil {
 				log.Error("failed to spawn instance", "error", err)
 				errCh <- err
 			}
@@ -318,8 +325,65 @@ func (w *Worker) handleJob(job []byte) error {
 	return nil
 }
 
+const defaultFunctionPort = 3000
+
+// resolveFunctionPort returns the single port used for MMDS, readiness and the
+// proxy target. 0 (unset) resolves to the historical default; the function API
+// and the default are unchanged.
+func resolveFunctionPort(port int) int {
+	if port > 0 {
+		return port
+	}
+	return defaultFunctionPort
+}
+
+// buildMMDSData assembles the guest MMDS payload. The port is always the
+// resolved port, never the raw (possibly 0) configured value.
+func buildMMDSData(bootToken string, fnCfg FunctionConfig, dns []string) map[string]interface{} {
+	data := map[string]interface{}{
+		"token":      bootToken,
+		"env":        fnCfg.EnvVars,
+		"entrypoint": fnCfg.Entrypoint,
+		"port":       resolveFunctionPort(fnCfg.Port),
+	}
+	if len(dns) > 0 {
+		data["dns"] = dns
+	}
+	return data
+}
+
+// Test seams: unit tests override these to exercise the post-launch stages of
+// provisioning (readiness, proxy, registration, cleanup) without firecracker
+// or root. Production always uses the real implementation.
+var (
+	provisionStart = func(ctx context.Context, inst *Instance, cfg InstanceConfig) error {
+		return inst.Start(cfg)
+	}
+	provisionWaitReady = func(ctx context.Context, inst *Instance, port int, timeout time.Duration) error {
+		return inst.WaitReady(ctx, port, timeout)
+	}
+	provisionStartProxy = func(inst *Instance, listenPort, targetPort int) error {
+		return inst.StartProxy(listenPort, targetPort)
+	}
+)
+
+// SpawnInstance provisions a function instance on a background context. It is
+// kept for callers (the scaler) that have no request-scoped context.
 func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
-	_, span := tracer().Start(context.Background(), "instance.spawn")
+	return w.SpawnInstanceContext(context.Background(), functionID)
+}
+
+// SpawnInstanceContext provisions and registers a VM for functionID.
+//
+// Context ownership: ctx governs provisioning only — code/runtime fetch,
+// network setup, readiness wait and registration. Cancelling it aborts an
+// in-flight spawn and cleans up the half-provisioned instance. It never owns
+// the VM: vm.Manager.Launch derives its own context.Background()-rooted
+// lifetime (shared/vm/vm.go), the *Instance keeps that VM alive after this
+// function returns, and worker shutdown stops tracked instances explicitly
+// rather than through this ctx.
+func (w *Worker) SpawnInstanceContext(ctx context.Context, functionID string) (*Instance, error) {
+	ctx, span := tracer().Start(ctx, "instance.spawn")
 	defer span.End()
 
 	spawnStart := time.Now()
@@ -330,9 +394,27 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	)
 	log := logger.With("function", functionID, "instance", instance.ID)
 
+	// Callbacks must be installed before Start: a VM can exit immediately, and
+	// monitorVM would otherwise find no death callback and leak its resources.
+	instance.SetOnRequest(w.MarkInvoked)
+	instance.SetNetnsManager(w.netnsMgr)
+	// The closure captures the instance rather than its ID, so death cleanup
+	// does not depend on w.instances membership (the instance is tracked only
+	// after readiness + proxy succeed).
+	instance.SetVMDeathCallback(func(_, _ string) {
+		w.handleVMDeath(instance)
+	})
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	codePath, err := w.codeCache.EnsureCode(functionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get code: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	w.mu.Lock()
@@ -348,6 +430,9 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 			rootfs = p
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	vcpu, memMB := fnCfg.VCPU, fnCfg.MemMB
 	if vcpu == 0 {
@@ -356,18 +441,10 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	if memMB == 0 {
 		memMB = 128
 	}
-	functionPort := fnCfg.Port
-	if functionPort == 0 {
-		functionPort = 3000
-	}
+	functionPort := resolveFunctionPort(fnCfg.Port)
 
 	bootToken := id.GenerateToken()
-	mmdsData := map[string]interface{}{
-		"token":      bootToken,
-		"env":        fnCfg.EnvVars,
-		"entrypoint": fnCfg.Entrypoint,
-		"port":       fnCfg.Port,
-	}
+	mmdsData := buildMMDSData(bootToken, fnCfg, w.cfg.GuestDNS)
 
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
@@ -381,37 +458,42 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 		MMDSData:     mmdsData,
 	}
 
-	if err := instance.Start(cfg); err != nil {
+	if err := provisionStart(ctx, instance, cfg); err != nil {
+		// A partial Start may already have provisioned network; Stop is safe
+		// after a partial start and no proxy port has been allocated yet.
+		w.cleanupInstance(functionID, instance)
 		return nil, fmt.Errorf("failed to start instance: %w", err)
 	}
+	if instance.isStopped() {
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("instance %s stopped during provisioning", instance.ID)
+	}
 
-	instance.SetVMDeathCallback(w.handleVMDeath)
-	instance.SetOnRequest(w.MarkInvoked)
-	if w.netnsMgr != nil {
-		instance.SetNetnsManager(w.netnsMgr)
+	if err := provisionWaitReady(ctx, instance, functionPort, 30*time.Second); err != nil {
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("instance not ready: %w", err)
+	}
+	if instance.isStopped() {
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("instance %s stopped during provisioning", instance.ID)
 	}
 
 	w.mu.Lock()
 	proxyPort := w.allocatePort()
 	metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
 	w.mu.Unlock()
+	// Record ownership before StartProxy so every failure path can release it.
+	instance.setProxyPort(proxyPort)
 
-	if err := instance.WaitReady(functionPort, 30*time.Second); err != nil {
-		w.mu.Lock()
-		w.releasePort(proxyPort)
-		metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
-		w.mu.Unlock()
-		instance.Stop()
-		return nil, fmt.Errorf("instance not ready: %w", err)
-	}
-
-	if err := instance.StartProxy(proxyPort, functionPort); err != nil {
-		w.mu.Lock()
-		w.releasePort(proxyPort)
-		metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
-		w.mu.Unlock()
-		instance.Stop()
+	if err := provisionStartProxy(instance, proxyPort, functionPort); err != nil {
+		w.cleanupInstance(functionID, instance)
 		return nil, fmt.Errorf("failed to start proxy: %w", err)
+	}
+	if instance.isStopped() {
+		// The VM died while the proxy was starting; the second Stop inside
+		// cleanup tears down the proxy server created above.
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("instance %s stopped during provisioning", instance.ID)
 	}
 
 	w.mu.Lock()
@@ -421,8 +503,24 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 
 	log.Info("instance started", "vm_ip", instance.GetVMIP(), "proxy_port", proxyPort)
 
-	if err := w.registry.RegisterInstance(functionID, instance.ID, proxyPort, instance.vmIP); err != nil {
+	if err := ctx.Err(); err != nil {
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("provisioning cancelled before registration: %w", err)
+	}
+	if err := w.registry.RegisterInstance(functionID, instance.ID, proxyPort, instance.GetVMIP()); err != nil {
+		// Registration is part of provisioning: a VM that is up but not
+		// registered must not be left running. Tear it down so the stream
+		// entry stays pending and is reclaimed.
 		log.Error("failed to register instance", "error", err)
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("failed to register instance: %w", err)
+	}
+	instance.markRegistered()
+	if instance.isStopped() {
+		// The VM died while registering; ensure the etcd key is removed before
+		// reporting failure so the entry is reclaimed cleanly.
+		w.cleanupInstance(functionID, instance)
+		return nil, fmt.Errorf("instance %s stopped during provisioning", instance.ID)
 	}
 
 	metrics.VMSpawnsTotal.WithLabelValues(functionID, "success").Inc()
@@ -431,15 +529,78 @@ func (w *Worker) SpawnInstance(functionID string) (*Instance, error) {
 	return instance, nil
 }
 
-func (w *Worker) Shutdown() error {
+// releaseInstancePort releases the proxy port allocated for an instance exactly
+// once, whether or not the instance is tracked in w.instances.
+func (w *Worker) releaseInstancePort(inst *Instance) {
+	if inst == nil || !inst.takePortOwnership() {
+		return
+	}
+	port := inst.GetProxyPort()
+
+	w.mu.Lock()
+	w.releasePort(port)
+	metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
+	w.mu.Unlock()
+}
+
+// detachInstance removes inst from the worker's bookkeeping. Returns true when
+// the instance was tracked. Safe to call when the instance was never tracked.
+func (w *Worker) detachInstance(functionID string, inst *Instance) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	for functionID, instances := range w.instances {
-		for _, inst := range instances {
-			logger.Info("stopping instance", "function", functionID, "instance", inst.ID)
-			inst.Stop()
+	instances, ok := w.instances[functionID]
+	if !ok {
+		return false
+	}
+	for idx, cur := range instances {
+		if cur != inst {
+			continue
 		}
+		w.instances[functionID] = append(instances[:idx], instances[idx+1:]...)
+		if len(w.instances[functionID]) == 0 {
+			delete(w.instances, functionID)
+		}
+		metrics.InstancesActive.WithLabelValues(functionID, w.cfg.WorkerID).Set(float64(len(w.instances[functionID])))
+		return true
+	}
+	return false
+}
+
+// cleanupInstance is the single cleanup entry point for stopped, dead and
+// failed instances. It unregisters, stops (idempotently), releases the proxy
+// port and drops bookkeeping. It is safe to call more than once and for
+// instances that were never tracked.
+func (w *Worker) cleanupInstance(functionID string, inst *Instance) {
+	if inst == nil {
+		return
+	}
+
+	if inst.takeRegistered() {
+		if err := w.registry.UnregisterInstance(functionID, inst.ID); err != nil {
+			logger.Error("failed to unregister instance", "function", functionID, "instance", inst.ID, "error", err)
+		}
+	}
+
+	if err := inst.Stop(); err != nil {
+		logger.Error("failed to stop instance", "function", functionID, "instance", inst.ID, "error", err)
+	}
+
+	w.releaseInstancePort(inst)
+	w.detachInstance(functionID, inst)
+}
+
+func (w *Worker) Shutdown() error {
+	w.mu.Lock()
+	all := make([]*Instance, 0)
+	for _, instances := range w.instances {
+		all = append(all, instances...)
+	}
+	w.mu.Unlock()
+
+	for _, inst := range all {
+		logger.Info("stopping instance", "function", inst.FunctionID, "instance", inst.ID)
+		w.cleanupInstance(inst.FunctionID, inst)
 	}
 
 	return nil
@@ -488,34 +649,28 @@ func (w *Worker) TotalInstances() int {
 
 func (w *Worker) StopInstance(functionID, instanceID string) error {
 	w.mu.Lock()
-	defer w.mu.Unlock()
-
 	instances, ok := w.instances[functionID]
 	if !ok {
+		w.mu.Unlock()
 		return fmt.Errorf("function %s not found", functionID)
 	}
-
-	for i, inst := range instances {
-		if inst.ID == instanceID {
-			// Unregister BEFORE draining so gateway traffic stops (~2s cache TTL) while in-flight requests finish.
-			if err := w.registry.UnregisterInstance(functionID, instanceID); err != nil {
-				logger.Error("failed to unregister instance", "function", functionID, "instance", instanceID, "error", err)
-			}
-
-			w.releasePort(inst.GetProxyPort())
-			metrics.PortsAllocated.Set(float64(len(w.usedPorts)))
-
-			inst.Stop()
-			w.instances[functionID] = append(instances[:i], instances[i+1:]...)
-			metrics.InstancesActive.WithLabelValues(functionID, w.cfg.WorkerID).Set(float64(len(w.instances[functionID])))
-			if len(w.instances[functionID]) == 0 {
-				delete(w.instances, functionID)
-			}
-			return nil
+	var inst *Instance
+	for _, cur := range instances {
+		if cur.ID == instanceID {
+			inst = cur
+			break
 		}
 	}
+	w.mu.Unlock()
 
-	return fmt.Errorf("instance %s not found", instanceID)
+	if inst == nil {
+		return fmt.Errorf("instance %s not found", instanceID)
+	}
+
+	// Unregister happens inside cleanupInstance before the proxy is drained, so
+	// gateway traffic stops (~2s cache TTL) while in-flight requests finish.
+	w.cleanupInstance(functionID, inst)
+	return nil
 }
 
 func (w *Worker) WatchCodeUpdates(ctx context.Context) {
@@ -559,17 +714,16 @@ func (w *Worker) handleCodeUpdate(functionID string) {
 	w.mu.Unlock()
 }
 
-func (w *Worker) handleVMDeath(functionID, instanceID string) {
-	log := logger.With("function", functionID, "instance", instanceID)
+// handleVMDeath is the exactly-once cleanup owner for a VM that exited without
+// a Stop request. It works whether or not the instance is tracked in
+// w.instances, so a VM that dies during provisioning is still fully cleaned up.
+func (w *Worker) handleVMDeath(inst *Instance) {
+	log := logger.With("function", inst.FunctionID, "instance", inst.ID)
 	log.Warn("handling VM death - cleaning up instance")
 
-	metrics.VMDeathsTotal.WithLabelValues(functionID, "unexpected").Inc()
-
-	if err := w.StopInstance(functionID, instanceID); err != nil {
-		log.Error("failed to cleanup dead instance", "error", err)
-	} else {
-		log.Info("dead instance cleaned up successfully")
-	}
+	metrics.VMDeathsTotal.WithLabelValues(inst.FunctionID, "unexpected").Inc()
+	w.cleanupInstance(inst.FunctionID, inst)
+	log.Info("dead instance cleaned up")
 }
 
 // allocatePort finds the next available port starting from 30000

@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -17,41 +19,52 @@ type MMDSData struct {
 	Env        map[string]string `json:"env"`
 	Entrypoint string            `json:"entrypoint"`
 	Port       int               `json:"port"`
+	DNS        []string          `json:"dns"`
 }
+
+// Bounded bootstrap retry policy. The worker waits up to 30s for guest
+// readiness, so we keep the worst case well under that:
+// 3 attempts * 5s HTTP timeout + 0.5s + 1s backoff = 16.5s.
+const (
+	metadataFetchAttempts = 3
+	metadataFetchBackoff  = 500 * time.Millisecond
+)
 
 func main() {
 	bootToken := parseBootToken()
 
-	var metadata *MMDSData
-	if bootToken != "" {
-		var err error
-		metadata, err = fetchMetadata(bootToken)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "aether-env: warning: %v (continuing with defaults)\n", err)
-			metadata = &MMDSData{Entrypoint: "handler.js"}
-		}
-	} else {
-		fmt.Fprintln(os.Stderr, "aether-env: no boot token, using defaults")
-		metadata = &MMDSData{Entrypoint: "handler.js"}
+	var argv []string
+	if len(os.Args) > 1 {
+		argv = os.Args[1:]
 	}
 
-	// Set env vars
-	for key, value := range metadata.Env {
+	// Only fetch bootstrap metadata when the kernel command line told us a
+	// token is expected. This is the "bootstrap was expected" signal.
+	var (
+		metadata *MMDSData
+		fetchErr error
+	)
+	if bootToken != "" {
+		metadata, fetchErr = fetchMetadataWithRetry(bootToken, metadataFetchAttempts, metadataFetchBackoff)
+	}
+
+	args, env, err := resolveBoot(bootToken, argv, metadata, fetchErr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "aether-env: refusing to start: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Set env vars.
+	for key, value := range env {
 		os.Setenv(key, value)
 	}
 
-	// Determine command to run
-	var args []string
-	if len(os.Args) > 1 {
-		// If args provided, use them (e.g., aether-env node handler.js)
-		args = os.Args[1:]
-	} else {
-		// Auto-detect runtime from entrypoint
-		entrypoint := metadata.Entrypoint
-		if entrypoint == "" {
-			entrypoint = "handler.js"
+	// DNS is optional. An empty list preserves the previous behavior of
+	// leaving /etc/resolv.conf untouched.
+	if metadata != nil && len(metadata.DNS) > 0 {
+		if err := writeResolvConf("/etc/resolv.conf", metadata.DNS); err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: warning: failed to write /etc/resolv.conf: %v\n", err)
 		}
-		args = getCommandForEntrypoint(entrypoint)
 	}
 
 	binary, err := exec.LookPath(args[0])
@@ -65,6 +78,49 @@ func main() {
 		fmt.Fprintf(os.Stderr, "aether-env: exec failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// resolveBoot is the pure fail-closed decision function. It selects the
+// command to exec and the environment to apply, given:
+//   - bootToken: the token parsed from the kernel command line ("" if absent)
+//   - argv: the explicit command from os.Args[1:] (nil if absent)
+//   - metadata: the MMDS payload (nil if it was not fetched)
+//   - fetchErr: the error from fetching/validating the MMDS payload
+//
+// Policy:
+//   - token present and metadata could not be loaded/verified -> error
+//     (never fall back to handler.js)
+//   - token absent and argv present -> legacy explicit-command path
+//   - token absent and no argv -> error (nothing legitimate to run)
+func resolveBoot(bootToken string, argv []string, metadata *MMDSData, fetchErr error) ([]string, map[string]string, error) {
+	hasArgv := len(argv) > 0
+
+	if bootToken != "" {
+		if fetchErr != nil {
+			return nil, nil, fmt.Errorf("bootstrap metadata was expected (boot token present) but could not be loaded: %w", fetchErr)
+		}
+		if metadata == nil {
+			return nil, nil, errors.New("bootstrap metadata was expected (boot token present) but none was returned")
+		}
+		if metadata.Token != bootToken {
+			return nil, nil, fmt.Errorf("bootstrap token mismatch (expected %q, got %q)", bootToken, metadata.Token)
+		}
+		if hasArgv {
+			return argv, metadata.Env, nil
+		}
+		entrypoint := metadata.Entrypoint
+		if entrypoint == "" {
+			entrypoint = "handler.js"
+		}
+		return getCommandForEntrypoint(entrypoint), metadata.Env, nil
+	}
+
+	if hasArgv {
+		// Legacy explicit-command path, e.g. aether-env node handler.js.
+		return argv, nil, nil
+	}
+
+	return nil, nil, errors.New("no boot token and no command provided; nothing to run")
 }
 
 func getCommandForEntrypoint(entrypoint string) []string {
@@ -93,6 +149,61 @@ func parseBootToken() string {
 		}
 	}
 	return ""
+}
+
+// fetchMetadataWithRetry calls fetchMetadata up to attempts times, sleeping
+// with an exponential backoff between tries. It returns the last error if all
+// attempts fail.
+func fetchMetadataWithRetry(bootToken string, attempts int, baseBackoff time.Duration) (*MMDSData, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if i > 0 {
+			time.Sleep(baseBackoff * time.Duration(1<<(i-1)))
+		}
+		metadata, err := fetchMetadata(bootToken)
+		if err == nil {
+			return metadata, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+// renderResolvConf renders the contents of a resolv.conf from a list of
+// nameserver addresses. It returns nil when there is nothing to write, which
+// signals to the caller that /etc/resolv.conf must be left untouched.
+func renderResolvConf(dns []string) []byte {
+	var b strings.Builder
+	for _, ip := range dns {
+		ip = strings.TrimSpace(ip)
+		if ip == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "nameserver %s\n", ip)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return []byte(b.String())
+}
+
+// writeResolvConf writes /etc/resolv.conf from the given DNS list. An empty or
+// whitespace-only list is a no-op.
+func writeResolvConf(path string, dns []string) error {
+	content := renderResolvConf(dns)
+	if content == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("failed to create %s: %w", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+	return nil
 }
 
 func fetchMetadata(bootToken string) (*MMDSData, error) {
@@ -130,4 +241,3 @@ func fetchMetadata(bootToken string) (*MMDSData, error) {
 
 	return &metadata, nil
 }
-
