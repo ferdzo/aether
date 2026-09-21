@@ -1,4 +1,32 @@
 # Project: Go-Firecracker FaaS Platform
+
+> ## Status update (post-roadmap)
+>
+> This file is an early project charter. The Phase 1/2/3 roadmap in §5 has been
+> completed and overtaken; keep the constraints in §6 as policy, not the phases.
+>
+> Since this was written, the following have been implemented:
+> - **Queue:** the Redis list was replaced by a durable Redis Stream
+>   (`stream:vm_provision`) read by consumer group `aether-workers`
+>   (`XReadGroup`), with `XACK` on success and a stale-claim reaper
+>   (`XPendingExt`/`XClaim`).
+> - **Networking:** `fc-bridge0`/TAP plus a `NET_MODE=netns` alternative, both
+>   with host egress NAT and guest DNS injection (`GUEST_DNS` → MMDS →
+>   `/etc/resolv.conf`); `NET_MODE=none` runs offline, NIC-less VMs.
+> - **Multi-runtime images:** guest rootfs images are resolved by name from
+>   object storage (`runtimes/<name>/rootfs.ext4`) instead of one hardcoded rootfs.
+> - **Warm scaling:** recently invoked functions keep a warm window and never
+>   scale below `MinInstances`; scaling values remain hardcoded in `worker/main.go`.
+> - **Durable provisioning:** ACK-at-spawn with in-flight/durable guards, so a slow
+>   spawn (or a long job) is not re-run and blocks nothing; process jobs also get
+>   an etcd `JobRecord` that outlives the worker.
+> - **Job execution path:** a process-mode guest supervisor (`init/main.go`) and a
+>   worker job core (`worker/internal/job.go`) run non-HTTP workloads, reporting
+>   `AETHER_EXIT:<nonce>:<code>` and resetting the VM.
+>
+> Authoritative docs: [`ARCHITECTURE.md`](../documentation/ARCHITECTURE.md)
+> (direction) and [`CONTEXT.md`](../documentation/CONTEXT.md) (current state).
+
 ## 1. Project Overview
 We are building a custom Function-as-a-Service (FaaS) platform from scratch to learn distributed systems and virtualization.
 **Goal:** Create a system where a user can request a function execution, and the system spins up a Firecracker microVM, executes the code, and returns the result.
@@ -9,7 +37,7 @@ The system follows a "Control Plane / Data Plane" separation.
 ### 2.1 The Tech Stack
 * **Language:** Go (Golang) 1.21+
 * **Virtualization:** Firecracker MicroVM (via `firecracker-go-sdk`)
-* **Queue/Signaling:** Redis (List primitives)
+* **Queue/Signaling:** Redis (Streams; the original List design is obsolete — see the status update above)
 * **State & Discovery:** etcd (Leases & Watchers)
 * **OS:** Linux (Requires KVM access)
 
@@ -22,7 +50,7 @@ The system follows a "Control Plane / Data Plane" separation.
 
 2.  **Worker Agent (The Data Plane)**
     * Runs on the compute node.
-    * Loops on `BRPOP` from **Redis** to pick up jobs.
+    * Reads the provision stream from **Redis** (`XReadGroup`, consumer group `aether-workers`) to pick up jobs.
     * Launches Firecracker VMs using the Go SDK.
     * Configures Host-Local Networking (TAP devices).
     * Registers specific VM IP:Port in **etcd** with a Lease (TTL).
@@ -31,8 +59,8 @@ The system follows a "Control Plane / Data Plane" separation.
 ## 3. Data Contracts & Schema
 
 ### 3.1 Redis (Work Queue)
-* **Key:** `queue:vm_provision`
-* **Type:** List (LPUSH / BRPOP)
+* **Key:** `stream:vm_provision` (the historical list `queue:vm_provision` is no longer used)
+* **Type:** Stream with consumer group `aether-workers` (`XADD` / `XReadGroup`, `XACK` on success)
 * **Payload:**
     ```json
     {
@@ -44,7 +72,7 @@ The system follows a "Control Plane / Data Plane" separation.
     ```
 
 ### 3.2 etcd (Service Discovery)
-* **Key Pattern:** `/functions/<function_id>/instances/<worker_id>`
+* **Key Pattern:** `/functions/<function_id>/instances/<instance_id>`
 * **Value:**
     ```json
     {
