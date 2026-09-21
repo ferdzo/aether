@@ -21,6 +21,7 @@ type RuntimeCache struct {
 	cacheDir string
 	mu       sync.RWMutex
 	cached   map[string]string // runtime name -> local rootfs path
+	locks    *keyedMutex
 }
 
 func NewRuntimeCache(minio *storage.Minio, bucket, cacheDir string) *RuntimeCache {
@@ -30,6 +31,7 @@ func NewRuntimeCache(minio *storage.Minio, bucket, cacheDir string) *RuntimeCach
 		bucket:   bucket,
 		cacheDir: cacheDir,
 		cached:   make(map[string]string),
+		locks:    newKeyedMutex(),
 	}
 }
 
@@ -39,6 +41,16 @@ func (c *RuntimeCache) Ensure(runtime string) (string, error) {
 	if runtime == "" {
 		return "", fmt.Errorf("runtime name is empty")
 	}
+	objectPath := runtime + "/rootfs.ext4"
+	return c.ensure(runtime, func() (io.ReadCloser, error) {
+		return c.minio.GetObject(c.bucket, objectPath)
+	})
+}
+
+// ensure resolves the local rootfs for runtime, downloading it through open
+// when it is not already in memory or on disk. Concurrent calls for the same
+// key are serialized so the object is fetched and published only once.
+func (c *RuntimeCache) ensure(runtime string, open func() (io.ReadCloser, error)) (string, error) {
 	localPath := filepath.Join(c.cacheDir, runtime+".ext4")
 
 	c.mu.RLock()
@@ -58,32 +70,50 @@ func (c *RuntimeCache) Ensure(runtime string) (string, error) {
 		return localPath, nil
 	}
 
-	objectPath := runtime + "/rootfs.ext4"
+	// One download per key: losers of this lock wait, then re-check the cache
+	// and disk before doing any work of their own.
+	lock := c.locks.lock(runtime)
+	defer c.locks.unlock(lock)
+
+	c.mu.RLock()
+	if path, ok := c.cached[runtime]; ok {
+		c.mu.RUnlock()
+		metrics.CodeCacheHits.Inc()
+		return path, nil
+	}
+	c.mu.RUnlock()
+
+	if _, err := os.Stat(localPath); err == nil {
+		c.mu.Lock()
+		c.cached[runtime] = localPath
+		c.mu.Unlock()
+		logger.Debug("runtime cache hit (disk)", "runtime", runtime)
+		metrics.CodeCacheHits.Inc()
+		return localPath, nil
+	}
+
 	logger.Info("downloading runtime image", "runtime", runtime, "bucket", c.bucket)
 	metrics.CodeCacheMisses.Inc()
 
-	obj, err := c.minio.GetObject(c.bucket, objectPath)
+	obj, err := open()
 	if err != nil {
 		return "", fmt.Errorf("failed to get runtime %q: %w", runtime, err)
 	}
 	defer obj.Close()
 
-	data, err := io.ReadAll(obj)
+	size, err := publishAtomic(localPath, obj)
 	if err != nil {
-		return "", fmt.Errorf("failed to read runtime image: %w", err)
+		return "", fmt.Errorf("failed to cache runtime image: %w", err)
 	}
-	if len(data) == 0 {
+	if size == 0 {
 		return "", fmt.Errorf("runtime image %q is empty", runtime)
-	}
-	if err := os.WriteFile(localPath, data, 0o644); err != nil {
-		return "", fmt.Errorf("failed to write runtime cache: %w", err)
 	}
 
 	c.mu.Lock()
 	c.cached[runtime] = localPath
 	c.mu.Unlock()
 
-	logger.Info("runtime cached", "runtime", runtime, "path", localPath, "size", len(data))
+	logger.Info("runtime cached", "runtime", runtime, "path", localPath, "size", size)
 	return localPath, nil
 }
 
