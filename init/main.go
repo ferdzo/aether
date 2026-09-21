@@ -20,7 +20,26 @@ type MMDSData struct {
 	Entrypoint string            `json:"entrypoint"`
 	Port       int               `json:"port"`
 	DNS        []string          `json:"dns"`
+
+	// Mode selects how aether-env runs the payload:
+	//   ""/"http" -> legacy behaviour: LookPath + syscall.Exec (function mode)
+	//   "process" -> guest supervisor: fork the command, wait, sentinel, reboot
+	Mode           string   `json:"mode"`
+	Command        []string `json:"command"`
+	TimeoutSeconds int      `json:"timeout_s"`
+	ExitNonce      string   `json:"exit_nonce"`
 }
+
+// Execution modes.
+const (
+	modeHTTP    = "http"
+	modeProcess = "process"
+)
+
+// processTimeoutExitCode is the conventional exit code reported when the
+// guest-side timeout fires and the supervisor kills the process group.
+// (Mirrors coreutils `timeout`, which exits 124 on timeout.)
+const processTimeoutExitCode = 124
 
 // Bounded bootstrap retry policy. The worker waits up to 30s for guest
 // readiness, so we keep the worst case well under that:
@@ -67,6 +86,30 @@ func main() {
 		}
 	}
 
+	if resolveMode(metadata) == modeProcess {
+		cmd, err := resolveProcessCommand(metadata, argv)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: refusing to start: %v\n", err)
+			os.Exit(1)
+		}
+
+		var timeout time.Duration
+		var nonce string
+		if metadata != nil {
+			if metadata.TimeoutSeconds > 0 {
+				timeout = time.Duration(metadata.TimeoutSeconds) * time.Second
+			}
+			nonce = metadata.ExitNonce
+		}
+
+		fmt.Fprintf(os.Stderr, "aether-env: supervisor running %v (timeout=%s, nonce=%q)\n", cmd, timeout, nonce)
+		if err := runSupervisor(cmd, timeout, nonce); err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: supervisor failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	binary, err := exec.LookPath(args[0])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "aether-env: command not found: %s\n", args[0])
@@ -77,6 +120,152 @@ func main() {
 	if err := syscall.Exec(binary, args, os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "aether-env: exec failed: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// resolveMode normalises the MMDS mode field into one of the two execution
+// modes. An empty mode (the historical function payload has no mode field) and
+// an explicit "http" both select the existing syscall.Exec path; any other
+// value also falls back to that path so the function flow keeps working
+// unchanged. "process" selects the guest supervisor.
+func resolveMode(metadata *MMDSData) string {
+	if metadata != nil && metadata.Mode == modeProcess {
+		return modeProcess
+	}
+	return modeHTTP
+}
+
+// resolveProcessCommand is the pure command-selection function for process
+// mode. Preference order:
+//  1. metadata.Command when non-empty (the job specifies its argv explicitly)
+//  2. argv when present (an explicit /init argument)
+//  3. otherwise fail: process mode never defaults to handler.js, because that
+//     would silently run the wrong thing for a job.
+func resolveProcessCommand(metadata *MMDSData, argv []string) ([]string, error) {
+	if metadata != nil && len(metadata.Command) > 0 {
+		return metadata.Command, nil
+	}
+	if len(argv) > 0 {
+		return argv, nil
+	}
+	return nil, errors.New("process mode: no command provided (MMDS command is empty and no argv was given)")
+}
+
+// formatExitSentinel renders the exit-status sentinel a host-side scanner
+// matches. With a nonce: "AETHER_EXIT:<nonce>:<code>"; without: "AETHER_EXIT:<code>".
+func formatExitSentinel(nonce string, code int) string {
+	if nonce != "" {
+		return fmt.Sprintf("AETHER_EXIT:%s:%d", nonce, code)
+	}
+	return fmt.Sprintf("AETHER_EXIT:%d", code)
+}
+
+// exitCodeFromWaitStatus maps a wait status to a conventional exit code:
+// 128+signal for a signalled process, otherwise the exit status itself.
+func exitCodeFromWaitStatus(status syscall.WaitStatus) int {
+	if status.Signaled() {
+		return 128 + int(status.Signal())
+	}
+	return status.ExitStatus()
+}
+
+// exitCodeFromState maps a finished process state to the exit code the
+// supervisor reports. It uses the real exit code and, when the process was
+// signalled, the conventional 128+signal value.
+func exitCodeFromState(state *os.ProcessState) int {
+	if state == nil {
+		return 1
+	}
+	if status, ok := state.Sys().(syscall.WaitStatus); ok {
+		return exitCodeFromWaitStatus(status)
+	}
+	return state.ExitCode()
+}
+
+// runSupervisor starts cmd as a child of this process (PID 1) with stdout and
+// stderr inherited from the guest serial console, waits for it (enforcing the
+// guest-side timeout), then flushes, prints the exit sentinel and resets the
+// VM.
+//
+// Conventions:
+//   - timeout > 0: on expiry the whole process group is SIGKILLed and the
+//     reported exit code is processTimeoutExitCode (124).
+//   - the child runs in its own process group (Setpgid) so that signalled
+//     cleanup reaches grandchildren too.
+//   - after the child exits, the process group is killed again to reap any
+//     straggler children, then syscall.Sync flushes filesystem writes before
+//     the sentinel is printed.
+//   - the sentinel is the final stdout line; reboot(RB_AUTOBOOT) terminates
+//     the VM. poweroff does not stop Firecracker on x86, so a reboot is
+//     required (the kernel command line carries reboot=k).
+func runSupervisor(cmd []string, timeout time.Duration, nonce string) error {
+	child := exec.Command(cmd[0], cmd[1:]...)
+	child.Stdin = os.Stdin
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	child.Env = os.Environ()
+	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	exitCode := 1
+	started := false
+	if err := child.Start(); err != nil {
+		// A command that cannot be started (e.g. not found) is reported as
+		// 127, matching the shell convention, so the VM still terminates with
+		// a sentinel instead of waiting for the host deadline.
+		fmt.Fprintf(os.Stderr, "aether-env: failed to start %v: %v\n", cmd, err)
+		exitCode = 127
+	} else {
+		started = true
+		exitCode = superviseChild(child, timeout)
+	}
+
+	if started {
+		// Best effort: reap any straggler children still in the group. The
+		// child has already exited, so ESRCH is expected and ignored.
+		_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+	}
+
+	// Flush filesystem writes before announcing completion.
+	syscall.Sync()
+
+	// Final stdout line before the VM resets, so a host scanner can match
+	// the nonce. stdout is unbuffered, so no explicit drain is needed.
+	fmt.Fprintf(os.Stdout, "%s\n", formatExitSentinel(nonce, exitCode))
+
+	if err := syscall.Reboot(syscall.LINUX_REBOOT_CMD_RESTART); err != nil {
+		fmt.Fprintf(os.Stderr, "aether-env: reboot failed: %v\n", err)
+		return err
+	}
+	return nil
+}
+
+// superviseChild waits for the child to exit, enforcing the guest-side
+// timeout. It returns the exit code, or processTimeoutExitCode when the
+// timeout fired and the process group was killed.
+func superviseChild(child *exec.Cmd, timeout time.Duration) int {
+	done := make(chan struct{})
+	go func() {
+		_ = child.Wait()
+		close(done)
+	}()
+
+	if timeout <= 0 {
+		<-done
+		return exitCodeFromState(child.ProcessState)
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case <-done:
+		return exitCodeFromState(child.ProcessState)
+	case <-timer.C:
+		// Kill the whole process group so children spawned by the workload
+		// cannot outlive the timeout, then reap the direct child.
+		_ = syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+		<-done
+		return processTimeoutExitCode
 	}
 }
 
