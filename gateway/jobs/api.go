@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -105,6 +106,7 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds int               `json:"timeout_seconds"`
 		VCPU           int               `json:"vcpu"`
 		MemoryMB       int               `json:"memory_mb"`
+		WorkspaceMB    int               `json:"workspace_mb"`
 		EnvVars        map[string]string `json:"env_vars"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -122,6 +124,14 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Mode != "" && req.Mode != jobModeProcess {
 		http.Error(w, `unsupported mode: only "process" is supported`, http.StatusBadRequest)
+		return
+	}
+	if req.WorkspaceMB < 0 {
+		http.Error(w, "workspace_mb must not be negative", http.StatusBadRequest)
+		return
+	}
+	if req.WorkspaceMB > protocol.MaxWorkspaceMB {
+		http.Error(w, fmt.Sprintf("workspace_mb must be at most %d", protocol.MaxWorkspaceMB), http.StatusBadRequest)
 		return
 	}
 	// vcpu and memory default to 1 and 128 when zero. A negative value would
@@ -165,6 +175,7 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 		TimeoutSeconds: req.TimeoutSeconds,
 		VCPU:           req.VCPU,
 		MemoryMB:       req.MemoryMB,
+		WorkspaceMB:    req.WorkspaceMB,
 		EnvVars:        req.EnvVars,
 	}
 

@@ -89,6 +89,9 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 }
 
 func (w *Worker) Run(ctx context.Context) error {
+	if w.cfg != nil {
+		w.gcWorkspaces()
+	}
 	if w.cfg != nil && w.cfg.NoNetwork {
 		// Offline mode: instances boot with no NIC, so there is no bridge (or
 		// netns) to set up and no host privileges are needed.
@@ -106,6 +109,21 @@ func (w *Worker) Run(ctx context.Context) error {
 	go w.claimStaleJobs(ctx)
 
 	return w.watchQueue(ctx)
+}
+
+// gcWorkspaces sweeps expired workspace images once at startup. It is
+// deliberately best-effort: a GC failure must never stop the worker from
+// serving jobs, and a fresh worker with no WorkspaceDir has nothing to sweep.
+func (w *Worker) gcWorkspaces() {
+	removed, err := GCWorkspaces(w.cfg.WorkspaceDir, w.cfg.WorkspaceTTL)
+	switch {
+	case err != nil:
+		logger.Warn("workspace GC completed with errors", "dir", w.cfg.WorkspaceDir, "removed", removed, "error", err)
+	case removed > 0:
+		logger.Info("workspace GC removed expired workspaces", "dir", w.cfg.WorkspaceDir, "removed", removed)
+	default:
+		logger.Debug("workspace GC found nothing to remove", "dir", w.cfg.WorkspaceDir)
+	}
 }
 
 func (w *Worker) ensureStreamGroup(ctx context.Context) error {
@@ -637,6 +655,18 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		return fail(fmt.Errorf("job cancelled before provisioning: %w", err))
 	}
 
+	// Workspace: create the backing image before launch. A declared drive that
+	// does not exist is a hard Firecracker error, so a creation failure is a
+	// provisioning failure and must not ACK (the entry stays retryable).
+	var workspacePath string
+	if job.WorkspaceMB > 0 {
+		wsPath, err := createJobWorkspace(w.cfg.WorkspaceDir, jobID, job.WorkspaceMB)
+		if err != nil {
+			return fail(fmt.Errorf("failed to create job workspace: %w", err))
+		}
+		workspacePath = wsPath
+	}
+
 	nonce := jobExitNonce(job, w.cfg.NoNetwork)
 
 	// MMDS is delivered over the guest's NIC, so a network-less job has no
@@ -674,6 +704,14 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		NoNetwork:     w.cfg.NoNetwork,
 		ConsoleWriter: console,
 	}
+	if workspacePath != "" {
+		// The root filesystem is /dev/vda; configured drives follow in slice
+		// order, so the workspace is /dev/vdb. It is deliberately writable: the
+		// whole point is to leave results behind. RootFSReadOnly stays as-is for
+		// now (the job rootfs is still read-write); making it read-only is a
+		// follow-up that depends on the workspace being universally available.
+		cfg.Drives = []vm.DriveSpec{{Path: workspacePath, ReadOnly: false}}
+	}
 
 	if err := provisionStart(ctx, instance, cfg); err != nil {
 		// Stop is safe after a partial start; no proxy port was allocated.
@@ -683,13 +721,14 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 
 	started := time.Now().UTC()
 	running := protocol.JobRecord{
-		JobID:       jobID,
-		RequestID:   job.RequestID,
-		Mode:        jobModeProcess,
-		State:       protocol.JobStateRunning,
-		WorkerID:    w.workerID(),
-		StartedAt:   started,
-		HeartbeatAt: started,
+		JobID:         jobID,
+		RequestID:     job.RequestID,
+		Mode:          jobModeProcess,
+		State:         protocol.JobStateRunning,
+		WorkerID:      w.workerID(),
+		StartedAt:     started,
+		HeartbeatAt:   started,
+		WorkspacePath: workspacePath,
 	}
 	if err := w.registry.PutJob(running); err != nil {
 		// Recording is best-effort: the VM is up and JobRunner will write the
@@ -703,6 +742,7 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		WorkerID:          w.workerID(),
 		Nonce:             nonce,
 		Timeout:           time.Duration(job.TimeoutSeconds) * time.Second,
+		WorkspacePath:     workspacePath,
 		Log:               console,
 		Wait:              func() error { return <-instance.ExitCh() },
 		Stop:              instance.Stop,
@@ -734,6 +774,9 @@ var (
 	startJobRunner = func(ctx context.Context, runner *JobRunner) {
 		go runner.Run(ctx)
 	}
+	// createJobWorkspace builds a job's workspace image. Tests override it so
+	// they exercise attachment without invoking mke2fs.
+	createJobWorkspace = CreateWorkspace
 )
 
 // SpawnInstance provisions a function instance on a background context. It is

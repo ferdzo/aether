@@ -37,6 +37,8 @@ func readEnv() *internal.Config {
 		GuestDNS:       parseGuestDNS(os.Getenv("GUEST_DNS")),
 		MaxDeliveries:  envInt("JOB_MAX_DELIVERIES", 5),
 		StreamMaxLen:   envInt64("STREAM_MAX_LEN", 1000),
+		WorkspaceDir:   envString("WORKSPACE_DIR", "/var/aether/workspaces"),
+		WorkspaceTTL:   envDuration("WORKSPACE_TTL", 24*time.Hour),
 		FunctionPort: func() int {
 			val := os.Getenv("FUNCTION_PORT")
 			if val == "" {
@@ -76,6 +78,28 @@ func envInt64(name string, def int64) int64 {
 		return def
 	}
 	return n
+}
+
+// envString reads a string env var, returning def when it is unset or blank.
+func envString(name, def string) string {
+	if val := strings.TrimSpace(os.Getenv(name)); val != "" {
+		return val
+	}
+	return def
+}
+
+// envDuration reads a Go duration env var, returning def when it is unset or
+// invalid. An explicit "0" is honoured (it disables the GC it feeds).
+func envDuration(name string, def time.Duration) time.Duration {
+	val := os.Getenv(name)
+	if val == "" {
+		return def
+	}
+	d, err := time.ParseDuration(val)
+	if err != nil {
+		return def
+	}
+	return d
 }
 
 // defaultGuestDNS is used when GUEST_DNS is unset. The host's own resolver

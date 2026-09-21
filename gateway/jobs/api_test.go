@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,6 +57,8 @@ func TestSubmitValidation(t *testing.T) {
 		{"empty command", `{"runtime":"job","command":[]}`},
 		{"command omitted", `{"runtime":"job"}`},
 		{"unsupported mode", `{"runtime":"job","command":["true"],"mode":"session"}`},
+		{"negative workspace_mb", `{"runtime":"job","command":["true"],"workspace_mb":-1}`},
+		{"oversized workspace_mb", fmt.Sprintf(`{"runtime":"job","command":["true"],"workspace_mb":%d}`, protocol.MaxWorkspaceMB+1)},
 		{"invalid json", `{"runtime":`},
 		// Resource values that would otherwise reach the Firecracker config.
 		{"negative vcpu", `{"runtime":"job","command":["true"],"timeout_seconds":30,"vcpu":-1}`},
@@ -160,6 +163,32 @@ func TestSubmitHonorsCallerID(t *testing.T) {
 	}
 	if job.JobID != "job-caller" {
 		t.Fatalf("job id = %q, want caller-supplied job-caller", job.JobID)
+	}
+}
+
+// A caller-requested workspace size must survive onto the published Job, so the
+// worker can provision the drive.
+func TestSubmitForwardsWorkspaceMB(t *testing.T) {
+	api, rc := newTestAPI(t)
+
+	rec := do(t, api, http.MethodPost, "/", `{"runtime":"job","command":["true"],"timeout_seconds":30,"workspace_mb":64}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d want 202: %s", rec.Code, rec.Body.String())
+	}
+
+	msgs, err := rc.Client().XRange(context.Background(), protocol.StreamProvision, "-", "+").Result()
+	if err != nil {
+		t.Fatalf("XRange: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 stream entry, got %d", len(msgs))
+	}
+	var job protocol.Job
+	if err := json.Unmarshal([]byte(msgs[0].Values["job"].(string)), &job); err != nil {
+		t.Fatalf("unmarshal job: %v", err)
+	}
+	if job.WorkspaceMB != 64 {
+		t.Fatalf("workspace_mb = %d, want 64", job.WorkspaceMB)
 	}
 }
 
