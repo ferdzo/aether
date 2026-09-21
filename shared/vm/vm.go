@@ -31,6 +31,16 @@ type DriveSpec struct {
 	ReadOnly bool
 }
 
+// VsockSpec describes a single virtio-vsock device. Firecracker bridges it to
+// the host as a Unix socket at Path; a host process connects to that socket
+// and, for a host-initiated connection, writes "CONNECT <port>\n" to reach a
+// listener inside the guest. CID is the 32-bit guest context id and must be
+// >= 3 (2 is reserved for the host).
+type VsockSpec struct {
+	Path string
+	CID  uint32
+}
+
 type Config struct {
 	KernelPath     string
 	RootFSPath     string
@@ -48,6 +58,7 @@ type Config struct {
 	MMDSData       map[string]interface{}
 	Stdout         io.Writer
 	Stderr         io.Writer
+	Vsock          *VsockSpec // when set, attaches one virtio-vsock device
 }
 
 type VM struct {
@@ -159,6 +170,16 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 
 	if cfg.NetNSPath != "" {
 		fcCfg.NetNS = cfg.NetNSPath
+	}
+
+	if cfg.Vsock != nil {
+		if cfg.Vsock.Path == "" {
+			cancel()
+			return nil, fmt.Errorf("vsock: empty path")
+		}
+		fcCfg.VsockDevices = []firecracker.VsockDevice{
+			{ID: "vsock0", Path: cfg.Vsock.Path, CID: cfg.Vsock.CID},
+		}
 	}
 
 	if cfg.TAPDeviceName != "" {
