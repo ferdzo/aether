@@ -34,6 +34,7 @@ func readEnv() *internal.Config {
 		BridgeName:     os.Getenv("BRIDGE_NAME"),
 		BridgeCIDR:     os.Getenv("BRIDGE_CIDR"),
 		MinioBucket:    os.Getenv("MINIO_BUCKET"),
+		GuestDNS:       parseGuestDNS(os.Getenv("GUEST_DNS")),
 		FunctionPort: func() int {
 			val := os.Getenv("FUNCTION_PORT")
 			if val == "" {
@@ -46,6 +47,48 @@ func readEnv() *internal.Config {
 			return port
 		}(),
 	}
+}
+
+// defaultGuestDNS is used when GUEST_DNS is unset. The host's own resolver
+// (systemd-resolved on 127.0.0.53) is not reachable from a guest, so we default
+// to public resolvers rather than copying the host's resolv.conf.
+var defaultGuestDNS = []string{"1.1.1.1", "8.8.8.8"}
+
+// parseGuestDNS parses a comma-separated GUEST_DNS list, falling back to
+// defaultGuestDNS when it is empty or contains no usable entry.
+func parseGuestDNS(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultGuestDNS
+	}
+	dns := make([]string, 0, 2)
+	for _, part := range strings.Split(raw, ",") {
+		if entry := strings.TrimSpace(part); entry != "" {
+			dns = append(dns, entry)
+		}
+	}
+	if len(dns) == 0 {
+		return defaultGuestDNS
+	}
+	return dns
+}
+
+// setupEgressNAT installs host-side NAT for whichever network mode is active,
+// using the host default interface. bridgeName is empty in netns mode, where
+// the rules are scoped by subnet instead.
+func setupEgressNAT(mode, bridgeName, cidr string) {
+	extIface, err := network.GetDefaultInterface()
+	if err != nil {
+		logger.Warn("egress NAT unavailable: no default interface detected", "mode", mode, "error", err)
+		return
+	}
+
+	nat := network.NewBridgeManager(bridgeName, cidr)
+	if err := nat.SetupNAT(extIface); err != nil {
+		logger.Warn("egress NAT setup failed; functions remain isolated", "mode", mode, "error", err)
+		return
+	}
+	logger.Info("egress NAT configured", "mode", mode, "external_iface", extIface)
 }
 
 func main() {
@@ -148,19 +191,11 @@ func main() {
 		}
 		worker.SetNetnsManager(netnsMgr)
 
-		extIface, ifaceErr := network.GetDefaultInterface()
-		if ifaceErr != nil {
-			logger.Warn("egress NAT unavailable: no default interface detected", "error", ifaceErr)
-		} else if nat := network.NewBridgeManager("", supernet); nat != nil {
-			if err := nat.SetupNAT(extIface); err != nil {
-				logger.Warn("egress NAT setup failed; functions remain isolated", "error", err)
-			} else {
-				logger.Info("egress NAT configured", "supernet", supernet, "external_iface", extIface)
-			}
-		}
+		setupEgressNAT("netns", "", supernet)
 		logger.Info("network mode: netns", "supernet", supernet)
 	} else {
-		logger.Info("network mode: bridge")
+		setupEgressNAT("bridge", config.BridgeName, config.BridgeCIDR)
+		logger.Info("network mode: bridge", "bridge", config.BridgeName, "cidr", config.BridgeCIDR)
 	}
 	scalingCfg := internal.ScalingConfig{
 		Enabled:          true,
