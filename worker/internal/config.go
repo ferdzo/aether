@@ -3,19 +3,22 @@ package internal
 import "time"
 
 type Config struct {
-    WorkerID       string
-    WorkerIP       string
-    RedisAddr      string
-    EtcdEndpoints  []string
-    FirecrackerBin string
-    KernelPath     string
-    RuntimePath    string
-    CodeCacheDir   string
-    SocketDir      string
-    BridgeName     string
-    BridgeCIDR     string
-    FunctionPort   int
-    MinioBucket    string
+	WorkerID       string
+	WorkerIP       string
+	RedisAddr      string
+	EtcdEndpoints  []string
+	FirecrackerBin string
+	KernelPath     string
+	RuntimePath    string
+	CodeCacheDir   string
+	SocketDir      string
+	BridgeName     string
+	BridgeCIDR     string
+	FunctionPort   int
+	MinioBucket    string
+	// GuestDNS is injected into the guest MMDS payload as "dns" when non-empty.
+	// main.go populates it from the environment.
+	GuestDNS []string
 }
 
 type ScalingConfig struct {
