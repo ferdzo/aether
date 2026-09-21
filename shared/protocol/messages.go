@@ -14,7 +14,39 @@ type Job struct {
 	Count        int               `json:"count"`
 	EnvVars      map[string]string `json:"env_vars,omitempty"`
 	TraceContext map[string]string `json:"trace_context,omitempty"`
+
+	// Process-mode job fields. All optional and additive: existing function
+	// provision jobs leave them zero and behave exactly as before.
+	JobID          string   `json:"job_id,omitempty"`
+	Mode           string   `json:"mode,omitempty"`
+	Command        []string `json:"command,omitempty"`
+	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
+	ExitNonce      string   `json:"exit_nonce,omitempty"`
 }
+
+// JobRecord is the durable etcd record of a single process job. It outlives the
+// worker that ran it, so it is never attached to a lease.
+type JobRecord struct {
+	JobID      string    `json:"job_id"`
+	RequestID  string    `json:"request_id,omitempty"`
+	Mode       string    `json:"mode,omitempty"`
+	State      string    `json:"state"`
+	ExitCode   int       `json:"exit_code"`
+	WorkerID   string    `json:"worker_id,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+}
+
+// Job lifecycle states. A job starts out provisioning/running and ends in
+// exactly one of done, failed or timeout.
+const (
+	JobStateProvisioning = "provisioning"
+	JobStateRunning      = "running"
+	JobStateDone         = "done"
+	JobStateFailed       = "failed"
+	JobStateTimeout      = "timeout"
+)
 
 type WorkerNode struct {
 	ID            string    `json:"id"`
@@ -43,10 +75,16 @@ const (
 	ChannelCodeUpdate = "channel:code_update"
 	EtcdFuncPrefix    = "/functions/"
 	EtcdWorkerPrefix  = "/workers/"
+	EtcdJobPrefix     = "/jobs/"
 )
 
 func InstanceKey(functionID, instanceID string) string {
 	return EtcdFuncPrefix + functionID + "/instances/" + instanceID
+}
+
+// JobKey returns the etcd key holding the record for jobID.
+func JobKey(jobID string) string {
+	return EtcdJobPrefix + jobID
 }
 
 func WorkerKey(workerID string) string {

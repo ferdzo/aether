@@ -154,3 +154,42 @@ func (r *Registry) HasReadyInstance(functionID string) (bool, error) {
 func (r *Registry) Close() error {
 	return r.client.Close()
 }
+
+// PutJob stores a job record durably. Unlike worker/instance registrations it
+// is not attached to a lease: job records must outlive the worker that wrote
+// them so the API can still answer for finished jobs.
+func (r *Registry) PutJob(rec protocol.JobRecord) error {
+	val, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job record: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	key := protocol.JobKey(rec.JobID)
+	if _, err := r.client.Put(ctx, key, string(val)); err != nil {
+		return fmt.Errorf("failed to put job record: %w", err)
+	}
+	logger.Info("job record stored", "job_id", rec.JobID, "state", rec.State)
+	return nil
+}
+
+// GetJob reads a job record by id. A missing record is an error.
+func (r *Registry) GetJob(jobID string) (protocol.JobRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := r.client.Get(ctx, protocol.JobKey(jobID))
+	if err != nil {
+		return protocol.JobRecord{}, fmt.Errorf("failed to get job record: %w", err)
+	}
+	if len(resp.Kvs) == 0 {
+		return protocol.JobRecord{}, fmt.Errorf("job %s not found", jobID)
+	}
+
+	var rec protocol.JobRecord
+	if err := json.Unmarshal(resp.Kvs[0].Value, &rec); err != nil {
+		return protocol.JobRecord{}, fmt.Errorf("failed to unmarshal job record: %w", err)
+	}
+	return rec, nil
+}
