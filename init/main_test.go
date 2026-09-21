@@ -131,6 +131,98 @@ func TestResolveBootFailClosed(t *testing.T) {
 	}
 }
 
+func TestParseProcessModeFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		argv       []string
+		wantOK     bool
+		wantCmd    []string
+		wantErr    bool
+		wantErrSub string
+	}{
+		{
+			name:    "process flag selects the supervisor",
+			argv:    []string{"--process", "sh", "-c", "echo hello; sleep 2; exit 42"},
+			wantOK:  true,
+			wantCmd: []string{"sh", "-c", "echo hello; sleep 2; exit 42"},
+		},
+		{
+			name:    "process flag with single command",
+			argv:    []string{"--process", "true"},
+			wantOK:  true,
+			wantCmd: []string{"true"},
+		},
+		{
+			name:       "process flag without a command fails",
+			argv:       []string{"--process"},
+			wantOK:     true,
+			wantErr:    true,
+			wantErrSub: "requires a command",
+		},
+		{
+			// A bare command must not select the supervisor: the caller keeps
+			// going down the existing boot-token/MMDS/HTTP path.
+			name:    "bare command does not select the supervisor",
+			argv:    []string{"node", "handler.js"},
+			wantOK:  false,
+			wantCmd: nil,
+		},
+		{
+			name:    "empty argv does not select the supervisor",
+			argv:    nil,
+			wantOK:  false,
+			wantCmd: nil,
+		},
+		{
+			// Only argv[0] is inspected, so the flag after a program name is
+			// treated as an argument to that program, not as process mode.
+			name:    "flag not in first position does not select the supervisor",
+			argv:    []string{"node", "--process"},
+			wantOK:  false,
+			wantCmd: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, ok, err := parseProcessModeFlag(tc.argv)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (cmd=%v)", cmd)
+				}
+				if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(cmd, tc.wantCmd) {
+				t.Fatalf("cmd = %v, want %v", cmd, tc.wantCmd)
+			}
+		})
+	}
+}
+
+// A bare argv (no --process) must continue to resolve to the HTTP path, i.e.
+// the explicit process entry point must not leak into the legacy flow.
+func TestBareCommandKeepsHTTPPath(t *testing.T) {
+	cmd, ok, err := parseProcessModeFlag([]string{"node", "handler.js"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("bare command selected process mode (cmd=%v)", cmd)
+	}
+	if got := resolveMode(nil); got != modeHTTP {
+		t.Fatalf("resolveMode(nil) = %q, want %q", got, modeHTTP)
+	}
+}
+
 func TestResolveMode(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -36,6 +36,14 @@ const (
 	modeProcess = "process"
 )
 
+// processFlag is the explicit, MMDS-free process-mode entry point:
+//
+//	aether-env --process <cmd> [args...]
+//
+// It lets a job rootfs run the supervisor directly, with no boot token, no
+// MMDS payload and no network interface. See scripts/build-job-rootfs.sh.
+const processFlag = "--process"
+
 // processTimeoutExitCode is the conventional exit code reported when the
 // guest-side timeout fires and the supervisor kills the process group.
 // (Mirrors coreutils `timeout`, which exits 124 on timeout.)
@@ -50,6 +58,23 @@ const (
 )
 
 func main() {
+	// Explicit, MMDS-free process mode. This is handled before any boot-token,
+	// MMDS or HTTP logic so it works with no boot token and no NIC. The
+	// supervisor runs with no timeout and no nonce, so the sentinel is
+	// "AETHER_EXIT:<code>".
+	if cmd, ok, err := parseProcessModeFlag(os.Args[1:]); ok {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: refusing to start: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "aether-env: supervisor running %v (timeout=0s, nonce=\"\")\n", cmd)
+		if err := runSupervisor(cmd, 0, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: supervisor failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	bootToken := parseBootToken()
 
 	var argv []string
@@ -121,6 +146,29 @@ func main() {
 		fmt.Fprintf(os.Stderr, "aether-env: exec failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// parseProcessModeFlag recognises the explicit, MMDS-free process entry point.
+//
+// argv is the process arguments after the program name (os.Args[1:]).
+//
+//   - ok=false: the flag was not present. The caller continues with the
+//     existing boot-token/MMDS/HTTP logic, so a bare command such as
+//     `aether-env node handler.js` is completely unchanged.
+//   - ok=true and err!=nil: the flag was present but no command followed it.
+//   - ok=true and err==nil: the caller runs runSupervisor on cmd with no
+//     timeout and no nonce (sentinel "AETHER_EXIT:<code>").
+//
+// Only the first argument is inspected, so the flag cannot be smuggled in as a
+// program argument.
+func parseProcessModeFlag(argv []string) (cmd []string, ok bool, err error) {
+	if len(argv) == 0 || argv[0] != processFlag {
+		return nil, false, nil
+	}
+	if len(argv) < 2 {
+		return nil, true, fmt.Errorf("%s requires a command (for example: aether-env %s sh -c 'echo hi')", processFlag, processFlag)
+	}
+	return argv[1:], true, nil
 }
 
 // resolveMode normalises the MMDS mode field into one of the two execution
