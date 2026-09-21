@@ -57,6 +57,17 @@ func TestSubmitValidation(t *testing.T) {
 		{"command omitted", `{"runtime":"job"}`},
 		{"unsupported mode", `{"runtime":"job","command":["true"],"mode":"session"}`},
 		{"invalid json", `{"runtime":`},
+		// Resource values that would otherwise reach the Firecracker config.
+		{"negative vcpu", `{"runtime":"job","command":["true"],"timeout_seconds":30,"vcpu":-1}`},
+		{"negative memory", `{"runtime":"job","command":["true"],"timeout_seconds":30,"memory_mb":-1}`},
+		// A job with no deadline cannot be stopped (there is no cancellation).
+		{"timeout omitted", `{"runtime":"job","command":["true"]}`},
+		{"zero timeout", `{"runtime":"job","command":["true"],"timeout_seconds":0}`},
+		{"negative timeout", `{"runtime":"job","command":["true"],"timeout_seconds":-1}`},
+		// An id that could not be fetched back, or that makes an awkward etcd key.
+		{"id with slash", `{"runtime":"job","command":["true"],"timeout_seconds":30,"id":"a/b"}`},
+		{"id with whitespace", `{"runtime":"job","command":["true"],"timeout_seconds":30,"id":"a b"}`},
+		{"id is dotdot", `{"runtime":"job","command":["true"],"timeout_seconds":30,"id":".."}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,7 +142,7 @@ func TestSubmitPublishesStreamEntry(t *testing.T) {
 func TestSubmitHonorsCallerID(t *testing.T) {
 	api, rc := newTestAPI(t)
 
-	rec := do(t, api, http.MethodPost, "/", `{"id":"job-caller","runtime":"job","command":["true"]}`)
+	rec := do(t, api, http.MethodPost, "/", `{"id":"job-caller","runtime":"job","command":["true"],"timeout_seconds":30}`)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("got %d want 202: %s", rec.Code, rec.Body.String())
 	}
@@ -198,7 +209,7 @@ func TestAuthRequired(t *testing.T) {
 	api, _ := newTestAPI(t)
 	api.authToken = "secret"
 
-	body := `{"runtime":"job","command":["true"]}`
+	body := `{"runtime":"job","command":["true"],"timeout_seconds":30}`
 	rec := do(t, api, http.MethodPost, "/", body)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("without token: got %d want 401", rec.Code)

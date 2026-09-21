@@ -124,6 +124,32 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `unsupported mode: only "process" is supported`, http.StatusBadRequest)
 		return
 	}
+	// vcpu and memory default to 1 and 128 when zero. A negative value would
+	// otherwise reach the Firecracker machine configuration unchanged.
+	if req.VCPU < 0 {
+		http.Error(w, "vcpu must not be negative", http.StatusBadRequest)
+		return
+	}
+	if req.MemoryMB < 0 {
+		http.Error(w, "memory_mb must not be negative", http.StatusBadRequest)
+		return
+	}
+	// A job with no deadline cannot be stopped: there is no cancellation yet,
+	// so require an explicit positive timeout rather than silently allowing an
+	// unbounded job.
+	if req.TimeoutSeconds <= 0 {
+		http.Error(w, "timeout_seconds must be positive", http.StatusBadRequest)
+		return
+	}
+	// Reject a caller-supplied id that could not be fetched back: the router
+	// treats '/' as a path separator, so such a job could never be read, and
+	// whitespace produces awkward etcd keys.
+	if req.ID != "" {
+		if err := protocol.ValidJobID(req.ID); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 
 	jobID := req.ID
 	if jobID == "" {

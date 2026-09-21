@@ -1,6 +1,43 @@
 package protocol
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
+
+// maxJobIDLen bounds a job id. It keeps etcd keys and workspace file names
+// reasonable; nothing depends on the exact number.
+const maxJobIDLen = 128
+
+// ValidJobID reports whether id can be used as an etcd key suffix, a URL path
+// segment and a workspace file name.
+//
+// The gateway rejects invalid caller-supplied ids so a job cannot be created
+// that is impossible to look up: a '/' in the id would be treated as a path
+// separator by the router, making GET /api/jobs/{id} unable to reach it. The
+// worker re-checks because jobs can also be written to the stream directly,
+// bypassing the API.
+func ValidJobID(id string) error {
+	if id == "" {
+		return errors.New("job id is empty")
+	}
+	if len(id) > maxJobIDLen {
+		return fmt.Errorf("job id is longer than %d characters", maxJobIDLen)
+	}
+	if id == "." || id == ".." {
+		return fmt.Errorf("job id %q is not allowed", id)
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf("job id %q contains %q; allowed: letters, digits, '-', '_' and '.'", id, r)
+		}
+	}
+	return nil
+}
 
 type Job struct {
 	RequestID    string            `json:"request_id"`
