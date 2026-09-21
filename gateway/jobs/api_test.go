@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"aether/gateway/internal"
 	"aether/shared/protocol"
@@ -63,7 +64,8 @@ func TestSubmitValidation(t *testing.T) {
 		// Resource values that would otherwise reach the Firecracker config.
 		{"negative vcpu", `{"runtime":"job","command":["true"],"timeout_seconds":30,"vcpu":-1}`},
 		{"negative memory", `{"runtime":"job","command":["true"],"timeout_seconds":30,"memory_mb":-1}`},
-		// A job with no deadline cannot be stopped (there is no cancellation).
+		// Cancellation is best-effort, so a job with no deadline may run
+		// unbounded if the cancel is missed; the API still requires a timeout.
 		{"timeout omitted", `{"runtime":"job","command":["true"]}`},
 		{"zero timeout", `{"runtime":"job","command":["true"],"timeout_seconds":0}`},
 		{"negative timeout", `{"runtime":"job","command":["true"],"timeout_seconds":-1}`},
@@ -245,6 +247,99 @@ func TestAuthRequired(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret")
+	authed := httptest.NewRecorder()
+	api.Routes().ServeHTTP(authed, req)
+	if authed.Code != http.StatusAccepted {
+		t.Fatalf("with token: got %d want 202: %s", authed.Code, authed.Body.String())
+	}
+}
+
+func TestCancelUnknownJobReturns404(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = stubStore{err: ErrJobNotFound}
+
+	rec := do(t, api, http.MethodDelete, "/job-missing", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d want 404: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCancelTerminalJobReturns409(t *testing.T) {
+	for _, state := range []string{
+		protocol.JobStateDone,
+		protocol.JobStateFailed,
+		protocol.JobStateTimeout,
+		protocol.JobStateCancelled,
+	} {
+		t.Run(state, func(t *testing.T) {
+			api, _ := newTestAPI(t)
+			api.records = stubStore{rec: &protocol.JobRecord{JobID: "job-term", State: state}}
+
+			rec := do(t, api, http.MethodDelete, "/job-term", "")
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("got %d want 409: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), state) {
+				t.Fatalf("409 body %q should name the terminal state %q", rec.Body.String(), state)
+			}
+		})
+	}
+}
+
+// A cancel for a running job publishes the id to the cancel channel and
+// acknowledges with 202/cancel_requested.
+func TestCancelRunningJobPublishesAndReturns202(t *testing.T) {
+	api, rc := newTestAPI(t)
+	api.records = stubStore{rec: &protocol.JobRecord{JobID: "job-run", State: protocol.JobStateRunning}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	sub := rc.Client().Subscribe(ctx, protocol.ChannelJobCancel)
+	defer sub.Close()
+	// Wait for the subscription to be registered before publishing.
+	if _, err := sub.Receive(ctx); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	rec := do(t, api, http.MethodDelete, "/job-run", "")
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d want 202: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("response is not JSON: %v (%s)", err, rec.Body.String())
+	}
+	if resp["job_id"] != "job-run" {
+		t.Fatalf("response job_id = %q, want job-run", resp["job_id"])
+	}
+	if resp["state"] != "cancel_requested" {
+		t.Fatalf("response state = %q, want cancel_requested", resp["state"])
+	}
+
+	select {
+	case msg := <-sub.Channel():
+		if msg.Payload != "job-run" {
+			t.Fatalf("cancel payload = %q, want job-run", msg.Payload)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no cancellation was published to the cancel channel")
+	}
+}
+
+func TestCancelAuthRequired(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.authToken = "secret"
+	api.records = stubStore{rec: &protocol.JobRecord{JobID: "job-auth", State: protocol.JobStateRunning}}
+
+	rec := do(t, api, http.MethodDelete, "/job-auth", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("without token: got %d want 401", rec.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/job-auth", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	authed := httptest.NewRecorder()
 	api.Routes().ServeHTTP(authed, req)

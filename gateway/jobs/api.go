@@ -21,6 +21,11 @@ import (
 
 const jobModeProcess = "process"
 
+// jobCancelRequestedState is the state echoed to the caller when a cancel
+// request has been published but the worker has not yet recorded the terminal
+// outcome. It is intentionally not a JobRecord state.
+const jobCancelRequestedState = "cancel_requested"
+
 // jobRecordTimeout bounds a single etcd read so an unreachable etcd fails the
 // request with 502 instead of hanging it.
 const jobRecordTimeout = 2 * time.Second
@@ -93,6 +98,7 @@ func (api *JobsAPI) Routes() chi.Router {
 
 	r.Post("/", requireAuth(api.Submit))
 	r.Get("/{id}", requireAuth(api.Get))
+	r.Delete("/{id}", requireAuth(api.Cancel))
 	return r
 }
 
@@ -144,9 +150,9 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "memory_mb must not be negative", http.StatusBadRequest)
 		return
 	}
-	// A job with no deadline cannot be stopped: there is no cancellation yet,
-	// so require an explicit positive timeout rather than silently allowing an
-	// unbounded job.
+	// Cancellation is best-effort pub/sub, so a job with no deadline could
+	// still run unbounded if the cancel message is missed. Require an explicit
+	// positive timeout rather than silently allowing an unbounded job.
 	if req.TimeoutSeconds <= 0 {
 		http.Error(w, "timeout_seconds must be positive", http.StatusBadRequest)
 		return
@@ -222,4 +228,67 @@ func (api *JobsAPI) Get(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rec)
+}
+
+// isTerminalJobState reports whether a job has already reached a final state
+// and therefore cannot be cancelled.
+func isTerminalJobState(state string) bool {
+	switch state {
+	case protocol.JobStateDone, protocol.JobStateFailed, protocol.JobStateTimeout, protocol.JobStateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// DELETE /api/jobs/{id}
+//
+// Looks up the durable record, refuses to "cancel" a job that is already
+// terminal, and otherwise publishes the id to the cancel channel. The worker
+// owning the job stops the VM and writes the terminal `cancelled` record; this
+// handler only acknowledges the request.
+func (api *JobsAPI) Cancel(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "id")
+	if jobID == "" {
+		http.Error(w, "job id is required", http.StatusBadRequest)
+		return
+	}
+	if api.records == nil {
+		http.Error(w, "job records unavailable", http.StatusBadGateway)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), jobRecordTimeout)
+	defer cancel()
+
+	rec, err := api.records.GetJob(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, ErrJobNotFound) {
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
+		}
+		logger.Error("failed to read job record", "job_id", jobID, "error", err)
+		http.Error(w, "failed to read job record", http.StatusBadGateway)
+		return
+	}
+
+	// Returning 202 for a job that can no longer be stopped would mislead the
+	// caller into thinking a cancel was delivered.
+	if isTerminalJobState(rec.State) {
+		http.Error(w, fmt.Sprintf("job is already %s and cannot be cancelled", rec.State), http.StatusConflict)
+		return
+	}
+
+	if err := api.redis.PublishJobCancel(ctx, jobID); err != nil {
+		logger.Error("failed to publish job cancel", "job_id", jobID, "error", err)
+		http.Error(w, "failed to publish job cancellation", http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{
+		"job_id": jobID,
+		"state":  jobCancelRequestedState,
+	})
 }
