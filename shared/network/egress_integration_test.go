@@ -14,21 +14,33 @@
 //	     AETHER_TEST_FIRECRACKER=/path/firecracker \
 //	     go test -tags integration -run TestGuestEgressBridgeMode -v ./network
 //
+// The guest handler is delivered on a code drive that the test builds in memory
+// and attaches as /dev/vdb, which the runtime /init mounts read-only at /code
+// before execing aether-env. The test therefore needs no gateway or host HTTP
+// server, and boot does not depend on the network under test. The runtime rootfs
+// must embed a current aether-env (one that writes /etc/resolv.conf from the
+// MMDS dns field); run scripts/rebuild-runtime-asset.sh to refresh .assets.
+//
 // See scripts/test-guest-egress.sh for a documented wrapper.
 package network
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"aether/shared/builder"
 	"aether/shared/vm"
 
 	"github.com/vishvananda/netlink"
@@ -81,9 +93,9 @@ func egressAssets(t *testing.T) (kernel, rootfs, firecrackerBin string) {
 	return kernel, rootfs, firecrackerBin
 }
 
-// egressHandlerJS is served to the guest as its function entrypoint. It proves
-// both requirements from inside the guest: DNS resolution of github.com and an
-// outbound HTTPS request. Results are exposed over HTTP on port 3000.
+// egressHandlerJS is the function entrypoint placed on the guest code drive. It
+// proves both requirements from inside the guest: DNS resolution of github.com
+// and an outbound HTTPS request. Results are exposed over HTTP on port 3000.
 const egressHandlerJS = `
 const dns = require('dns');
 const https = require('https');
@@ -126,24 +138,50 @@ type egressResult struct {
 	Error       string `json:"error"`
 }
 
-// serveGuestHandler serves the entrypoint the runtime /init fetches from the
-// gateway (see scripts/prepare-runtime.sh) so the guest can pull it over the
-// same network path under test.
-func serveGuestHandler(t *testing.T, addr string) *http.Server {
+// writeCodeDrive builds the guest code drive in-process and returns its path.
+//
+// The current runtime images mount a read-only code drive as /dev/vdb at /code
+// and exec the entrypoint from there (see scripts/setup.sh and
+// scripts/build-runtime.sh). The test mirrors that: it packs handler.js into a
+// tar.gz in memory, hands it to shared/builder (which extracts it and produces a
+// 2 MiB ext4), and writes the image to a temp file to attach as the code drive.
+// Delivering the handler this way keeps boot independent of the network under
+// test -- no gateway or host HTTP server is involved.
+func writeCodeDrive(t *testing.T, handlerJS string) string {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/handler.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		_, _ = io.WriteString(w, egressHandlerJS)
-	})
 
-	srv := &http.Server{Handler: mux}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatalf("listen on %s: %v", addr, err)
+	payload := []byte(handlerJS)
+
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name: "handler.js",
+		Mode: 0o644,
+		Size: int64(len(payload)),
+	}); err != nil {
+		t.Fatalf("write code archive header: %v", err)
 	}
-	go func() { _ = srv.Serve(ln) }()
-	return srv
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatalf("write code archive body: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close code archive: %v", err)
+	}
+	if err := gzw.Close(); err != nil {
+		t.Fatalf("close code archive gzip: %v", err)
+	}
+
+	image, err := builder.BuildFromArchive(buf.Bytes(), "code.tar.gz")
+	if err != nil {
+		t.Fatalf("build code drive: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "code.ext4")
+	if err := os.WriteFile(path, image, 0o644); err != nil {
+		t.Fatalf("write code drive: %v", err)
+	}
+	return path
 }
 
 func waitForGuestEgress(t *testing.T, guestIP string, port int, timeout time.Duration) egressResult {
@@ -223,13 +261,13 @@ func TestGuestEgressBridgeMode(t *testing.T) {
 		t.Fatalf("AttachTAPToBridge: %v", err)
 	}
 
-	srv := serveGuestHandler(t, net.JoinHostPort(bm.GetGatewayIP(), "8080"))
-	defer srv.Close()
+	codeDrive := writeCodeDrive(t, egressHandlerJS)
 
 	manager := vm.NewManager(firecrackerBin)
 	instance, err := manager.Launch(vm.Config{
 		KernelPath:    kernel,
 		RootFSPath:    rootfs,
+		CodeDrivePath: codeDrive,
 		SocketPath:    fmt.Sprintf("%s/egress-%d.sock", t.TempDir(), os.Getpid()),
 		VCPUCount:     1,
 		MemSizeMB:     256,
