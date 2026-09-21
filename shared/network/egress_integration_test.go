@@ -267,7 +267,7 @@ func TestGuestEgressBridgeMode(t *testing.T) {
 	instance, err := manager.Launch(vm.Config{
 		KernelPath:    kernel,
 		RootFSPath:    rootfs,
-		CodeDrivePath: codeDrive,
+		Drives:        []vm.DriveSpec{{Path: codeDrive, ReadOnly: true}},
 		SocketPath:    fmt.Sprintf("%s/egress-%d.sock", t.TempDir(), os.Getpid()),
 		VCPUCount:     1,
 		MemSizeMB:     256,

@@ -449,7 +449,7 @@ func (w *Worker) SpawnInstanceContext(ctx context.Context, functionID string) (*
 	cfg := InstanceConfig{
 		KernelPath:   w.cfg.KernelPath,
 		RuntimePath:  rootfs,
-		CodePath:     codePath,
+		Drives:       []vm.DriveSpec{{Path: codePath, ReadOnly: true}},
 		SocketPath:   filepath.Join(w.cfg.SocketDir, instance.ID+".sock"),
 		VCPUCount:    vcpu,
 		MemSizeMB:    memMB,

@@ -24,22 +24,30 @@ func generateMACFromIP(ip string) string {
 	return fmt.Sprintf("AA:FC:00:00:%02X:%02X", oct2, oct3)
 }
 
+// DriveSpec describes an additional block device attached to the guest in
+// order after the root filesystem.
+type DriveSpec struct {
+	Path     string
+	ReadOnly bool
+}
+
 type Config struct {
-	KernelPath    string
-	RootFSPath    string
-	CodeDrivePath string
-	SocketPath    string
-	VCPUCount     int64
-	MemSizeMB     int64
-	TAPDeviceName string
-	VMIP          string
-	GatewayIP     string
-	GuestMask     string // defaults to 255.255.255.0; /30 networks pass 255.255.255.252
-	NetNSPath     string // when set, the VM process runs inside this named netns
-	BootToken     string
-	MMDSData      map[string]interface{}
-	Stdout        io.Writer
-	Stderr        io.Writer
+	KernelPath     string
+	RootFSPath     string
+	RootFSReadOnly bool // zero value keeps the root filesystem read-write
+	Drives         []DriveSpec
+	SocketPath     string
+	VCPUCount      int64
+	MemSizeMB      int64
+	TAPDeviceName  string
+	VMIP           string
+	GatewayIP      string
+	GuestMask      string // defaults to 255.255.255.0; /30 networks pass 255.255.255.252
+	NetNSPath      string // when set, the VM process runs inside this named netns
+	BootToken      string
+	MMDSData       map[string]interface{}
+	Stdout         io.Writer
+	Stderr         io.Writer
 }
 
 type VM struct {
@@ -60,12 +68,52 @@ func NewManager(firecrackerBin string) *Manager {
 	return &Manager{FirecrackerBin: firecrackerBin}
 }
 
+// buildDrives assembles the ordered device list for a VM. The root filesystem
+// is always the first (root) device, so the guest sees it as /dev/vda; each
+// configured DriveSpec follows in slice order as /dev/vdb, /dev/vdc, and so on.
+// Every declared drive must have a non-empty path that exists on the host: a
+// missing drive is a hard error rather than a silent skip, because the guest
+// fails hard when it cannot mount a drive it was told to expect.
+func buildDrives(cfg Config) ([]models.Drive, error) {
+	drives := []models.Drive{
+		{
+			DriveID:      firecracker.String("rootfs"),
+			PathOnHost:   firecracker.String(cfg.RootFSPath),
+			IsRootDevice: firecracker.Bool(true),
+			IsReadOnly:   firecracker.Bool(cfg.RootFSReadOnly),
+		},
+	}
+
+	for i, spec := range cfg.Drives {
+		driveID := fmt.Sprintf("drive%d", i)
+		if spec.Path == "" {
+			return nil, fmt.Errorf("%s: empty path", driveID)
+		}
+		if _, err := os.Stat(spec.Path); err != nil {
+			return nil, fmt.Errorf("%s: path %q: %w", driveID, spec.Path, err)
+		}
+		drives = append(drives, models.Drive{
+			DriveID:      firecracker.String(driveID),
+			PathOnHost:   firecracker.String(spec.Path),
+			IsRootDevice: firecracker.Bool(false),
+			IsReadOnly:   firecracker.Bool(spec.ReadOnly),
+		})
+	}
+
+	return drives, nil
+}
+
 func (m *Manager) Launch(cfg Config) (*VM, error) {
 	if _, err := os.Stat(cfg.KernelPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("kernel not found: %s", cfg.KernelPath)
 	}
 	if _, err := os.Stat(cfg.RootFSPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("rootfs not found: %s", cfg.RootFSPath)
+	}
+
+	drives, err := buildDrives(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	if cfg.VCPUCount == 0 {
@@ -91,26 +139,6 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	}
 	if cfg.BootToken != "" {
 		bootArgs = fmt.Sprintf("%s aether_token=%s", bootArgs, cfg.BootToken)
-	}
-
-	drives := []models.Drive{
-		{
-			DriveID:      firecracker.String("rootfs"),
-			PathOnHost:   firecracker.String(cfg.RootFSPath),
-			IsRootDevice: firecracker.Bool(true),
-			IsReadOnly:   firecracker.Bool(false),
-		},
-	}
-
-	if cfg.CodeDrivePath != "" {
-		if _, err := os.Stat(cfg.CodeDrivePath); err == nil {
-			drives = append(drives, models.Drive{
-				DriveID:      firecracker.String("code"),
-				PathOnHost:   firecracker.String(cfg.CodeDrivePath),
-				IsRootDevice: firecracker.Bool(false),
-				IsReadOnly:   firecracker.Bool(true),
-			})
-		}
 	}
 
 	fcCfg := firecracker.Config{
