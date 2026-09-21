@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -87,6 +88,9 @@ func TestStartJobSpawnsAcksAndIsUntracked(t *testing.T) {
 	}
 	if gotCfg.ConsoleWriter == nil {
 		t.Fatal("job instance must be given the job log as its console writer")
+	}
+	if len(gotCfg.Drives) != 0 {
+		t.Fatalf("a job without WorkspaceMB must attach no drives, got %+v", gotCfg.Drives)
 	}
 	if got := gotCfg.MMDSData["mode"]; got != jobModeProcess {
 		t.Fatalf("mmds mode = %v, want %q", got, jobModeProcess)
@@ -252,5 +256,120 @@ func TestInstanceExitChSignalsOnce(t *testing.T) {
 	case err := <-inst.ExitCh():
 		t.Fatalf("ExitCh delivered a second value: %v", err)
 	default:
+	}
+}
+
+// withWorkspaceCreator overrides how a job's workspace image is built, so the
+// dispatch tests exercise attachment without invoking mke2fs.
+func withWorkspaceCreator(t *testing.T, fn func(dir, jobID string, sizeMB int) (string, error)) {
+	t.Helper()
+	prev := createJobWorkspace
+	if fn != nil {
+		createJobWorkspace = fn
+	}
+	t.Cleanup(func() { createJobWorkspace = prev })
+}
+
+// A job with WorkspaceMB must create the image before launch, attach it as the
+// first writable drive, and carry the path on both the running record and the
+// runner config so the terminal record inherits it.
+func TestStartJobWithWorkspaceAttachesDriveAndRecordsPath(t *testing.T) {
+	w := newJobWorker(t)
+	wsDir := t.TempDir()
+	w.cfg.WorkspaceDir = wsDir
+
+	wantPath := filepath.Join(wsDir, "job-ws.ext4")
+	var gotDir, gotJobID string
+	var gotSize int
+	withWorkspaceCreator(t, func(dir, jobID string, sizeMB int) (string, error) {
+		gotDir, gotJobID, gotSize = dir, jobID, sizeMB
+		return wantPath, nil
+	})
+
+	var gotCfg InstanceConfig
+	withProvisionSeams(t, func(_ context.Context, _ *Instance, cfg InstanceConfig) error {
+		gotCfg = cfg
+		return nil
+	}, nil, nil)
+
+	var gotRunner *JobRunner
+	withJobRunnerSeam(t, func(_ context.Context, r *JobRunner) {
+		gotRunner = r
+	})
+
+	job := protocol.Job{
+		JobID:       "job-ws",
+		RequestID:   "req-ws",
+		Mode:        jobModeProcess,
+		Command:     []string{"true"},
+		WorkspaceMB: 64,
+	}
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := w.handleJob(context.Background(), data); err != nil {
+		t.Fatalf("handleJob = %v, want nil (spawn must ACK)", err)
+	}
+
+	if gotDir != wsDir || gotJobID != "job-ws" || gotSize != 64 {
+		t.Fatalf("workspace request = (%q, %q, %d), want (%q, job-ws, 64)", gotDir, gotJobID, gotSize, wsDir)
+	}
+	if len(gotCfg.Drives) != 1 {
+		t.Fatalf("drives = %+v, want exactly one workspace drive", gotCfg.Drives)
+	}
+	if d := gotCfg.Drives[0]; d.Path != wantPath || d.ReadOnly {
+		t.Fatalf("workspace drive = %+v, want a writable %q", d, wantPath)
+	}
+	if gotRunner == nil {
+		t.Fatal("runner was never started")
+	}
+	if gotRunner.workspacePath != wantPath {
+		t.Fatalf("runner workspace path = %q, want %q", gotRunner.workspacePath, wantPath)
+	}
+}
+
+// A workspace creation failure is a provisioning failure: no VM may launch, the
+// error must propagate so the entry stays pending, and the in-flight marker
+// must be cleared for a retry.
+func TestStartJobWorkspaceCreationFailureClearsInflightMarker(t *testing.T) {
+	w := newJobWorker(t)
+	w.cfg.WorkspaceDir = t.TempDir()
+
+	withWorkspaceCreator(t, func(string, string, int) (string, error) {
+		return "", errors.New("no space left on device")
+	})
+
+	var launches int32
+	withProvisionSeams(t, func(context.Context, *Instance, InstanceConfig) error {
+		atomic.AddInt32(&launches, 1)
+		return nil
+	}, nil, nil)
+	withJobRunnerSeam(t, func(context.Context, *JobRunner) {})
+
+	job := protocol.Job{
+		JobID:       "job-ws-fail",
+		RequestID:   "req-ws-fail",
+		Mode:        jobModeProcess,
+		Command:     []string{"true"},
+		WorkspaceMB: 64,
+	}
+	data, err := json.Marshal(job)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	err = w.handleJob(context.Background(), data)
+	if err == nil {
+		t.Fatal("workspace failure must return an error so the entry stays pending")
+	}
+	if !strings.Contains(err.Error(), "failed to create job workspace") {
+		t.Fatalf("unexpected error shape: %v", err)
+	}
+	if got := atomic.LoadInt32(&launches); got != 0 {
+		t.Fatalf("launches = %d, want 0 (no VM without a workspace)", got)
+	}
+	if getErr := w.redis.Get(context.Background(), jobInflightKey(job.RequestID)).Err(); getErr != redis.Nil {
+		t.Fatalf("in-flight marker not cleared after failure: %v", getErr)
 	}
 }

@@ -30,6 +30,12 @@ type Config struct {
 	// StreamMaxLen bounds the provision stream with an approximate XTRIM. 0
 	// disables trimming. main.go defaults it to 1000; the DLQ is never trimmed.
 	StreamMaxLen int64
+	// WorkspaceDir is the host directory holding job workspace images. main.go
+	// defaults it to /var/aether/workspaces.
+	WorkspaceDir string
+	// WorkspaceTTL is how long an unused workspace image is retained before
+	// startup GC removes it. <= 0 disables GC. main.go defaults it to 24h.
+	WorkspaceTTL time.Duration
 }
 
 type ScalingConfig struct {

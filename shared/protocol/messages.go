@@ -59,7 +59,21 @@ type Job struct {
 	Command        []string `json:"command,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
 	ExitNonce      string   `json:"exit_nonce,omitempty"`
+
+	// WorkspaceMB requests a writable workspace drive of this many mebibytes.
+	// Zero (the default) attaches no drive, so the guest writes only to its own
+	// rootfs. When positive the worker creates an ext4 image and attaches it as
+	// the first configured drive (/dev/vdb), mounted at /workspace by the job
+	// rootfs. The image survives the VM and is subject to worker-side GC.
+	WorkspaceMB int `json:"workspace_mb,omitempty"`
 }
+
+// MaxWorkspaceMB bounds a job's requested workspace size. It is shared by the
+// gateway (which rejects oversized submissions up front) and the worker (which
+// refuses to hand mke2fs an absurd size). 64 GiB is far beyond any realistic
+// coding workspace and keeps a unit typo (bytes instead of MiB) from asking the
+// host for terabytes.
+const MaxWorkspaceMB = 65536
 
 // JobRecord is the durable etcd record of a single process job. It outlives the
 // worker that ran it, so it is never attached to a lease.
@@ -77,6 +91,10 @@ type JobRecord struct {
 	// advancing belongs to a dead worker); no reconciler consumes it yet.
 	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
 	FinishedAt  time.Time `json:"finished_at"`
+	// WorkspacePath is the host path to the job's workspace image, when one was
+	// requested. The guest sees it mounted at /workspace; the image outlives the
+	// VM, so this path is how a caller retrieves the results.
+	WorkspacePath string `json:"workspace_path,omitempty"`
 }
 
 // Job lifecycle states. A job starts out provisioning/running and ends in

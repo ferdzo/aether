@@ -75,6 +75,13 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+if [ -b /dev/vdb ]; then
+  mkdir -p /workspace
+  if mount -t ext4 /dev/vdb /workspace 2>/dev/null; then
+    export HOME=/workspace
+    cd /workspace
+  fi
+fi
 exec /usr/bin/aether-env
 EOF
 else
@@ -87,6 +94,13 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+if [ -b /dev/vdb ]; then
+  mkdir -p /workspace
+  if mount -t ext4 /dev/vdb /workspace 2>/dev/null; then
+    export HOME=/workspace
+    cd /workspace
+  fi
+fi
 exec /usr/bin/aether-env --process sh -c '$ESC_COMMAND'
 EOF
 fi

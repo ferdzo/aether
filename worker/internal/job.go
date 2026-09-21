@@ -213,6 +213,11 @@ type JobRunnerConfig struct {
 	Nonce     string
 	Timeout   time.Duration
 
+	// WorkspacePath is the host path to the job's workspace image, if any. It
+	// is copied onto the running and terminal records so callers can find the
+	// persisted results after the VM is gone.
+	WorkspacePath string
+
 	// Log is the bounded console sink attached to the VM. When nil a default
 	// sink is created; both are reachable via (*JobRunner).Log.
 	Log *jobLog
@@ -245,6 +250,8 @@ type JobRunner struct {
 	timeout   time.Duration
 	log       *jobLog
 
+	workspacePath string
+
 	wait func() error
 	stop func() error
 
@@ -272,6 +279,8 @@ func NewJobRunner(cfg JobRunnerConfig) *JobRunner {
 		wait:      cfg.Wait,
 		stop:      cfg.Stop,
 		record:    cfg.Record,
+
+		workspacePath: cfg.WorkspacePath,
 
 		heartbeat:         cfg.Heartbeat,
 		heartbeatInterval: cfg.HeartbeatInterval,
@@ -308,16 +317,17 @@ func (r *JobRunner) Run(ctx context.Context) protocol.JobRecord {
 
 	finished := time.Now().UTC()
 	rec := protocol.JobRecord{
-		JobID:       r.jobID,
-		RequestID:   r.requestID,
-		Mode:        jobModeProcess,
-		State:       state,
-		ExitCode:    exitCode,
-		WorkerID:    r.workerID,
-		Error:       errMsg,
-		StartedAt:   started,
-		HeartbeatAt: finished,
-		FinishedAt:  finished,
+		JobID:         r.jobID,
+		RequestID:     r.requestID,
+		Mode:          jobModeProcess,
+		State:         state,
+		ExitCode:      exitCode,
+		WorkerID:      r.workerID,
+		Error:         errMsg,
+		StartedAt:     started,
+		HeartbeatAt:   finished,
+		FinishedAt:    finished,
+		WorkspacePath: r.workspacePath,
 	}
 
 	if r.record != nil {
@@ -356,13 +366,14 @@ func (r *JobRunner) startHeartbeat(ctx context.Context, started time.Time) func(
 				return
 			case <-ticker.C:
 				rec := protocol.JobRecord{
-					JobID:       r.jobID,
-					RequestID:   r.requestID,
-					Mode:        jobModeProcess,
-					State:       protocol.JobStateRunning,
-					WorkerID:    r.workerID,
-					StartedAt:   started,
-					HeartbeatAt: time.Now().UTC(),
+					JobID:         r.jobID,
+					RequestID:     r.requestID,
+					Mode:          jobModeProcess,
+					State:         protocol.JobStateRunning,
+					WorkerID:      r.workerID,
+					StartedAt:     started,
+					HeartbeatAt:   time.Now().UTC(),
+					WorkspacePath: r.workspacePath,
 				}
 				if err := r.heartbeat(rec); err != nil {
 					logger.Warn("failed to record job heartbeat", "job_id", r.jobID, "error", err)
