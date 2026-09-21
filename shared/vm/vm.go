@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
@@ -189,17 +190,51 @@ func (m *Manager) Launch(cfg Config) (*VM, error) {
 	}, nil
 }
 
+// Wait blocks until the Firecracker process exits or until the VM lifetime
+// context (VM.Ctx) is cancelled. Unlike the management calls below it is meant
+// to observe the lifetime context, so it keeps using VM.Ctx.
 func (v *VM) Wait() error {
+	if v.Machine == nil {
+		return fmt.Errorf("vm: machine not started")
+	}
 	return v.Machine.Wait(v.Ctx)
 }
 
+// Shutdown asks the guest to power off (CtrlAltDel). It must not use VM.Ctx:
+// cancelling the lifetime context is itself part of teardown, and an already
+// cancelled context would abort the request before it reached the VMM. A fresh,
+// bounded context is used so a hung VMM cannot block shutdown forever.
+//
+// The lifetime context is only cancelled if the graceful request fails, as a
+// fallback that makes the SDK SIGTERM the VMM. Cancelling is idempotent, so
+// calling Shutdown repeatedly is safe.
 func (v *VM) Shutdown() error {
-	v.Cancel()
-	return v.Machine.Shutdown(v.Ctx)
+	if v.Machine == nil {
+		if v.Cancel != nil {
+			v.Cancel()
+		}
+		return fmt.Errorf("vm: machine not started")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := v.Machine.Shutdown(ctx); err != nil {
+		if v.Cancel != nil {
+			v.Cancel()
+		}
+		return err
+	}
+	return nil
 }
 
+// Stop cancels the VM lifetime context (which makes the SDK stop the VMM
+// process) and then signals the process directly. It is safe to call more than
+// once: context cancel funcs and the SDK's StopVMM are both idempotent.
 func (v *VM) Stop() error {
-	v.Cancel()
+	if v.Cancel != nil {
+		v.Cancel()
+	}
+	if v.Machine == nil {
+		return fmt.Errorf("vm: machine not started")
+	}
 	return v.Machine.StopVMM()
 }
-
