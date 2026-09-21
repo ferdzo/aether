@@ -19,6 +19,10 @@ type Config struct {
 	// GuestDNS is injected into the guest MMDS payload as "dns" when non-empty.
 	// main.go populates it from the environment.
 	GuestDNS []string
+	// NoNetwork selects the offline NET_MODE=none path: instances boot without
+	// a NIC, so no bridge/netns setup and no CAP_NET_ADMIN are required. main.go
+	// populates it from the environment.
+	NoNetwork bool
 }
 
 type ScalingConfig struct {
