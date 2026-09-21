@@ -149,6 +149,20 @@ setTimeout(function () { process.exit(0); }, 300);
 	}
 
 	out, errOut := stdout.String(), stderr.String()
+	if dir := os.Getenv("AETHER_SMOKE_LOGDIR"); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("create log dir: %v", err)
+		}
+		outPath := filepath.Join(dir, "guest-stdout.log")
+		errPath := filepath.Join(dir, "guest-stderr.log")
+		if err := os.WriteFile(outPath, []byte(out), 0o644); err != nil {
+			t.Fatalf("write %s: %v", outPath, err)
+		}
+		if err := os.WriteFile(errPath, []byte(errOut), 0o644); err != nil {
+			t.Fatalf("write %s: %v", errPath, err)
+		}
+		t.Logf("full console logs written to %s and %s", outPath, errPath)
+	}
 	t.Logf("captured stdout (%d bytes):\n%s", len(out), tail(out, 2000))
 	t.Logf("captured stderr (%d bytes):\n%s", len(errOut), tail(errOut, 1000))
 
