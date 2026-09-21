@@ -3,9 +3,11 @@ package main
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -126,6 +128,260 @@ func TestResolveBootFailClosed(t *testing.T) {
 				t.Fatalf("env = %v, want %v", env, tc.wantEnv)
 			}
 		})
+	}
+}
+
+func TestParseProcessModeFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		argv       []string
+		wantOK     bool
+		wantCmd    []string
+		wantErr    bool
+		wantErrSub string
+	}{
+		{
+			name:    "process flag selects the supervisor",
+			argv:    []string{"--process", "sh", "-c", "echo hello; sleep 2; exit 42"},
+			wantOK:  true,
+			wantCmd: []string{"sh", "-c", "echo hello; sleep 2; exit 42"},
+		},
+		{
+			name:    "process flag with single command",
+			argv:    []string{"--process", "true"},
+			wantOK:  true,
+			wantCmd: []string{"true"},
+		},
+		{
+			name:       "process flag without a command fails",
+			argv:       []string{"--process"},
+			wantOK:     true,
+			wantErr:    true,
+			wantErrSub: "requires a command",
+		},
+		{
+			// A bare command must not select the supervisor: the caller keeps
+			// going down the existing boot-token/MMDS/HTTP path.
+			name:    "bare command does not select the supervisor",
+			argv:    []string{"node", "handler.js"},
+			wantOK:  false,
+			wantCmd: nil,
+		},
+		{
+			name:    "empty argv does not select the supervisor",
+			argv:    nil,
+			wantOK:  false,
+			wantCmd: nil,
+		},
+		{
+			// Only argv[0] is inspected, so the flag after a program name is
+			// treated as an argument to that program, not as process mode.
+			name:    "flag not in first position does not select the supervisor",
+			argv:    []string{"node", "--process"},
+			wantOK:  false,
+			wantCmd: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd, ok, err := parseProcessModeFlag(tc.argv)
+			if ok != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (cmd=%v)", cmd)
+				}
+				if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(cmd, tc.wantCmd) {
+				t.Fatalf("cmd = %v, want %v", cmd, tc.wantCmd)
+			}
+		})
+	}
+}
+
+// A bare argv (no --process) must continue to resolve to the HTTP path, i.e.
+// the explicit process entry point must not leak into the legacy flow.
+func TestBareCommandKeepsHTTPPath(t *testing.T) {
+	cmd, ok, err := parseProcessModeFlag([]string{"node", "handler.js"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("bare command selected process mode (cmd=%v)", cmd)
+	}
+	if got := resolveMode(nil); got != modeHTTP {
+		t.Fatalf("resolveMode(nil) = %q, want %q", got, modeHTTP)
+	}
+}
+
+func TestResolveMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata *MMDSData
+		want     string
+	}{
+		{"nil metadata selects http", nil, modeHTTP},
+		{"empty mode selects http", &MMDSData{}, modeHTTP},
+		{"explicit http selects http", &MMDSData{Mode: "http"}, modeHTTP},
+		{"process selects supervisor", &MMDSData{Mode: "process"}, modeProcess},
+		{"unknown mode falls back to http", &MMDSData{Mode: "bogus"}, modeHTTP},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveMode(tc.metadata); got != tc.want {
+				t.Fatalf("resolveMode(%+v) = %q, want %q", tc.metadata, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveProcessCommand(t *testing.T) {
+	tests := []struct {
+		name       string
+		metadata   *MMDSData
+		argv       []string
+		want       []string
+		wantErr    bool
+		wantErrSub string
+	}{
+		{
+			name:     "MMDS command wins over argv",
+			metadata: &MMDSData{Command: []string{"echo", "from-mmds"}},
+			argv:     []string{"echo", "from-argv"},
+			want:     []string{"echo", "from-mmds"},
+		},
+		{
+			name:     "falls back to argv when command empty",
+			metadata: &MMDSData{},
+			argv:     []string{"sh", "-c", "true"},
+			want:     []string{"sh", "-c", "true"},
+		},
+		{
+			name:     "falls back to argv when metadata nil",
+			metadata: nil,
+			argv:     []string{"python3", "script.py"},
+			want:     []string{"python3", "script.py"},
+		},
+		{
+			name:       "errors when both empty",
+			metadata:   &MMDSData{},
+			argv:       nil,
+			wantErr:    true,
+			wantErrSub: "no command provided",
+		},
+		{
+			name:       "errors when metadata nil and no argv",
+			metadata:   nil,
+			argv:       nil,
+			wantErr:    true,
+			wantErrSub: "no command provided",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveProcessCommand(tc.metadata, tc.argv)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (cmd=%v)", got)
+				}
+				if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErrSub)
+				}
+				if got != nil {
+					t.Fatalf("expected nil command on error, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("resolveProcessCommand = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatExitSentinel(t *testing.T) {
+	tests := []struct {
+		name  string
+		nonce string
+		code  int
+		want  string
+	}{
+		{"with nonce", "nonce-abc", 0, "AETHER_EXIT:nonce-abc:0"},
+		{"with nonce and non-zero code", "nonce-abc", 137, "AETHER_EXIT:nonce-abc:137"},
+		{"without nonce", "", 124, "AETHER_EXIT:124"},
+		{"without nonce and zero code", "", 0, "AETHER_EXIT:0"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatExitSentinel(tc.nonce, tc.code); got != tc.want {
+				t.Fatalf("formatExitSentinel(%q, %d) = %q, want %q", tc.nonce, tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExitCodeFromWaitStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status syscall.WaitStatus
+		want   int
+	}{
+		{"normal exit zero", syscall.WaitStatus(0), 0},
+		{"normal exit code", syscall.WaitStatus(42 << 8), 42},
+		{"signalled SIGKILL", syscall.WaitStatus(syscall.SIGKILL), 128 + int(syscall.SIGKILL)},
+		{"signalled SIGTERM", syscall.WaitStatus(syscall.SIGTERM), 128 + int(syscall.SIGTERM)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := exitCodeFromWaitStatus(tc.status); got != tc.want {
+				t.Fatalf("exitCodeFromWaitStatus(%d) = %d, want %d", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExitCodeFromStateNormalExit exercises the wrapper with a real short-lived
+// child purely to obtain an *os.ProcessState carrying a known exit code; it
+// neither touches MMDS nor reboots. The signalled mapping is covered purely by
+// TestExitCodeFromWaitStatus.
+func TestExitCodeFromStateNormalExit(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cmd := exec.Command("sh", "-c", "exit 42")
+	if err := cmd.Run(); err != nil {
+		if _, ok := err.(*exec.ExitError); !ok {
+			t.Fatalf("running helper child: %v", err)
+		}
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("expected ProcessState to be populated")
+	}
+	if got := exitCodeFromState(cmd.ProcessState); got != 42 {
+		t.Fatalf("exitCodeFromState = %d, want 42", got)
+	}
+}
+
+func TestExitCodeFromStateNil(t *testing.T) {
+	if got := exitCodeFromState(nil); got != 1 {
+		t.Fatalf("exitCodeFromState(nil) = %d, want 1", got)
 	}
 }
 
