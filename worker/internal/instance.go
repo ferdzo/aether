@@ -8,6 +8,7 @@ import (
 	"aether/shared/vm"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -59,11 +60,15 @@ type Instance struct {
 	mu           sync.Mutex
 	stdoutWriter *telemetry.VMLogWriter
 	stderrWriter *telemetry.VMLogWriter
-	span         trace.Span
-	onVMDeath    func(functionID, instanceID string)
-	onRequest    func(functionID string)
-	netnsMgr     *network.NetnsManager
-	inet         *network.InstanceNet
+	// exitCh receives the VM's exit exactly once. monitorVM is the only sender;
+	// a single consumer (the job runner) waits on it. Buffered (size 1) so the
+	// monitor never blocks when nobody is waiting.
+	exitCh    chan error
+	span      trace.Span
+	onVMDeath func(functionID, instanceID string)
+	onRequest func(functionID string)
+	netnsMgr  *network.NetnsManager
+	inet      *network.InstanceNet
 }
 
 type InstanceConfig struct {
@@ -76,6 +81,11 @@ type InstanceConfig struct {
 	FunctionPort int
 	BootToken    string
 	MMDSData     map[string]interface{}
+
+	// ConsoleWriter, when non-nil, receives the guest's stdout and stderr
+	// instead of the default per-instance telemetry writers. Process jobs use
+	// it to attach their bounded jobLog sink. Nil preserves the default.
+	ConsoleWriter io.Writer
 }
 
 func (i *Instance) IncrementActiveRequests() {
@@ -129,8 +139,26 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	i.mu.Lock()
 	i.span = span
 	i.mu.Unlock()
-	i.stdoutWriter.SetSpan(span)
-	i.stderrWriter.SetSpan(span)
+	if i.stdoutWriter != nil {
+		i.stdoutWriter.SetSpan(span)
+	}
+	if i.stderrWriter != nil {
+		i.stderrWriter.SetSpan(span)
+	}
+
+	// A caller-supplied console sink (process jobs) takes precedence over the
+	// default telemetry writers; nil keeps the existing per-instance behaviour.
+	var stdout, stderr io.Writer
+	if cfg.ConsoleWriter != nil {
+		stdout, stderr = cfg.ConsoleWriter, cfg.ConsoleWriter
+	} else {
+		if i.stdoutWriter != nil {
+			stdout = i.stdoutWriter
+		}
+		if i.stderrWriter != nil {
+			stderr = i.stderrWriter
+		}
+	}
 
 	var (
 		inet          *network.InstanceNet
@@ -204,8 +232,8 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		NetNSPath:     netNSPath,
 		BootToken:     cfg.BootToken,
 		MMDSData:      cfg.MMDSData,
-		Stdout:        i.stdoutWriter,
-		Stderr:        i.stderrWriter,
+		Stdout:        stdout,
+		Stderr:        stderr,
 	}
 
 	i.mu.Lock()
@@ -535,6 +563,36 @@ func (i *Instance) getVM() *vm.VM {
 	return i.vm
 }
 
+// exitChannel returns the lazily-initialised exit channel. Lazily allocating
+// keeps ExitCh safe on instances built as struct literals (tests, partial
+// construction) that never went through NewInstance.
+func (i *Instance) exitChannel() chan error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.exitCh == nil {
+		i.exitCh = make(chan error, 1)
+	}
+	return i.exitCh
+}
+
+// ExitCh exposes the VM process exit to exactly one consumer (the job runner).
+// It is closed over by a buffered channel that monitorVM signals exactly once,
+// in every branch, so a reader never blocks forever. It must not be read
+// instead of monitorVM: monitorVM stays the only vm.Wait() caller.
+func (i *Instance) ExitCh() <-chan error {
+	return i.exitChannel()
+}
+
+// signalExit records the VM exit on the buffered channel without blocking. The
+// buffer is size 1 and monitorVM is the only sender, so the first signal wins
+// and a repeated signal (defensive) is dropped.
+func (i *Instance) signalExit(err error) {
+	select {
+	case i.exitChannel() <- err:
+	default:
+	}
+}
+
 func (i *Instance) monitorVM() {
 	log := logger.With("instance", i.ID, "function", i.FunctionID)
 	log.Debug("started VM process monitor")
@@ -542,6 +600,7 @@ func (i *Instance) monitorVM() {
 	vmInstance := i.getVM()
 	if vmInstance == nil {
 		log.Debug("no VM to monitor")
+		i.signalExit(nil)
 		return
 	}
 
@@ -549,6 +608,7 @@ func (i *Instance) monitorVM() {
 
 	if status := i.getStatus(); status == StatusStopping || status == StatusStopped {
 		log.Debug("VM exited normally")
+		i.signalExit(err)
 		return
 	}
 
@@ -564,4 +624,5 @@ func (i *Instance) monitorVM() {
 	} else {
 		log.Warn("no cleanup callback registered")
 	}
+	i.signalExit(err)
 }

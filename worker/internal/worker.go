@@ -267,6 +267,13 @@ func (w *Worker) handleJob(ctx context.Context, job []byte) error {
 		return fmt.Errorf("job cancelled before provisioning: %w", err)
 	}
 
+	// Process jobs (guest supervisor, one command, exit sentinel) are dispatched
+	// before any function defaults are applied. Their outcome is recorded
+	// asynchronously by startJob; only the spawn itself decides the ACK.
+	if jobData.Mode == jobModeProcess {
+		return w.startJob(ctx, jobData)
+	}
+
 	w.mu.Lock()
 	port := jobData.Port
 	if port == 0 {
@@ -352,6 +359,190 @@ func buildMMDSData(bootToken string, fnCfg FunctionConfig, dns []string) map[str
 	return data
 }
 
+// In-flight job guard. The marker is set with SetNX before provisioning and
+// left to expire on success, so a redelivered request within the TTL is a
+// no-op. It is deleted only when provisioning fails before the VM is spawned,
+// which is what allows the redelivery to retry.
+const (
+	jobInflightKeyPrefix = "job:req:"
+	jobInflightTTL       = 120 * time.Second
+)
+
+func jobInflightKey(requestID string) string {
+	return jobInflightKeyPrefix + requestID
+}
+
+// buildJobMMDSData assembles the MMDS payload for a process job. The command
+// is passed through verbatim; timeout_s is always emitted (0 means "no guest
+// deadline"), as is the exit nonce the guest stamps on its final line.
+func buildJobMMDSData(bootToken string, job protocol.Job, dns []string, nonce string) map[string]interface{} {
+	data := map[string]interface{}{
+		"token":      bootToken,
+		"mode":       jobModeProcess,
+		"command":    job.Command,
+		"timeout_s":  job.TimeoutSeconds,
+		"exit_nonce": nonce,
+		"env":        job.EnvVars,
+	}
+	if len(dns) > 0 {
+		data["dns"] = dns
+	}
+	return data
+}
+
+// workerID returns the id recorded on job records. It falls back to the
+// configured id for bare Worker literals built without NewWorker.
+func (w *Worker) workerID() string {
+	if w.consumerName != "" {
+		return w.consumerName
+	}
+	if w.cfg != nil {
+		return w.cfg.WorkerID
+	}
+	return ""
+}
+
+// startJob provisions and launches a single process-mode job.
+//
+// ACK invariant: it returns nil as soon as the VM has been *spawned*, so the
+// stream entry is ACKed immediately. The job's outcome (done/failed/timeout) is
+// classified and recorded asynchronously by JobRunner and is never an ACK
+// condition. An error is returned only for a failure before the spawn, after
+// clearing the in-flight marker, so a redelivery can retry.
+//
+// Job VMs are deliberately invisible to the scaler: they are neither appended
+// to w.instances nor registered as function instances in etcd. The durable job
+// record is the only registry entry and JobRunner owns cleanup.
+func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
+	jobID := job.JobID
+	if jobID == "" {
+		jobID = job.RequestID
+	}
+	log := logger.With("job_id", jobID, "request_id", job.RequestID)
+	log.Info("received process job", "command", job.Command, "timeout_s", job.TimeoutSeconds)
+
+	// Durable guard: a record already running or done means another consumer
+	// owns this job; skip (and ACK). A lookup error (missing record or etcd
+	// unavailable) is not fatal — the in-flight marker is the live guard.
+	if jobID != "" {
+		if rec, err := w.registry.GetJob(jobID); err == nil {
+			if rec.State == protocol.JobStateRunning || rec.State == protocol.JobStateDone {
+				log.Info("job already running or done, skipping", "state", rec.State)
+				return nil
+			}
+		}
+	}
+
+	// In-flight guard: a redelivery while the first delivery is still
+	// provisioning must not launch a second VM.
+	inflightKey := jobInflightKey(job.RequestID)
+	if job.RequestID != "" {
+		set, err := w.redis.SetNX(ctx, inflightKey, protocol.JobStateProvisioning, jobInflightTTL).Result()
+		if err != nil {
+			return fmt.Errorf("failed to set job in-flight marker: %w", err)
+		}
+		if !set {
+			log.Info("job request already in flight, skipping")
+			return nil
+		}
+	}
+
+	// fail releases the in-flight marker so a redelivery can retry. It is used
+	// for every failure before the VM is spawned.
+	fail := func(err error) error {
+		if job.RequestID != "" {
+			dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if delErr := w.redis.Del(dctx, inflightKey).Err(); delErr != nil {
+				log.Warn("failed to clear job in-flight marker", "error", delErr)
+			}
+		}
+		return err
+	}
+
+	w.mu.Lock()
+	runtimeCache := w.runtimeCache
+	w.mu.Unlock()
+
+	rootfs := w.cfg.RuntimePath
+	if job.Runtime != "" && runtimeCache != nil {
+		p, err := runtimeCache.Ensure(job.Runtime)
+		if err != nil {
+			return fail(fmt.Errorf("failed to resolve job runtime %q: %w", job.Runtime, err))
+		}
+		rootfs = p
+	}
+
+	if err := ctx.Err(); err != nil {
+		return fail(fmt.Errorf("job cancelled before provisioning: %w", err))
+	}
+
+	nonce := job.ExitNonce
+	if nonce == "" {
+		nonce = id.GenerateToken()
+	}
+	bootToken := id.GenerateToken()
+
+	vcpu := int64(job.VCPU)
+	if vcpu == 0 {
+		vcpu = 1
+	}
+	memMB := int64(job.MemoryMB)
+	if memMB == 0 {
+		memMB = 128
+	}
+
+	instance := NewInstance(job.FunctionID, w.vmMgr, w.bridgeMgr)
+	console := newJobLog(defaultJobLogBytes, nonce)
+
+	cfg := InstanceConfig{
+		KernelPath:    w.cfg.KernelPath,
+		RuntimePath:   rootfs,
+		SocketPath:    filepath.Join(w.cfg.SocketDir, instance.ID+".sock"),
+		VCPUCount:     vcpu,
+		MemSizeMB:     memMB,
+		BootToken:     bootToken,
+		MMDSData:      buildJobMMDSData(bootToken, job, w.cfg.GuestDNS, nonce),
+		ConsoleWriter: console,
+	}
+
+	if err := provisionStart(ctx, instance, cfg); err != nil {
+		// Stop is safe after a partial start; no proxy port was allocated.
+		_ = instance.Stop()
+		return fail(fmt.Errorf("failed to start job instance: %w", err))
+	}
+
+	running := protocol.JobRecord{
+		JobID:     jobID,
+		RequestID: job.RequestID,
+		Mode:      jobModeProcess,
+		State:     protocol.JobStateRunning,
+		WorkerID:  w.workerID(),
+		StartedAt: time.Now().UTC(),
+	}
+	if err := w.registry.PutJob(running); err != nil {
+		// Recording is best-effort: the VM is up and JobRunner will write the
+		// terminal record. Never fail the ACK because of a registry hiccup.
+		log.Error("failed to record running job", "error", err)
+	}
+
+	runner := NewJobRunner(JobRunnerConfig{
+		JobID:     jobID,
+		RequestID: job.RequestID,
+		WorkerID:  w.workerID(),
+		Nonce:     nonce,
+		Timeout:   time.Duration(job.TimeoutSeconds) * time.Second,
+		Log:       console,
+		Wait:      func() error { return <-instance.ExitCh() },
+		Stop:      instance.Stop,
+		Record:    func(rec protocol.JobRecord) error { return w.registry.PutJob(rec) },
+	})
+
+	startJobRunner(ctx, runner)
+	log.Info("process job launched", "instance_id", instance.ID, "runtime", job.Runtime)
+	return nil
+}
+
 // Test seams: unit tests override these to exercise the post-launch stages of
 // provisioning (readiness, proxy, registration, cleanup) without firecracker
 // or root. Production always uses the real implementation.
@@ -364,6 +555,11 @@ var (
 	}
 	provisionStartProxy = func(inst *Instance, listenPort, targetPort int) error {
 		return inst.StartProxy(listenPort, targetPort)
+	}
+	// startJobRunner launches the asynchronous outcome recorder for a process
+	// job. Tests override it to observe the runner without waiting on a VM.
+	startJobRunner = func(ctx context.Context, runner *JobRunner) {
+		go runner.Run(ctx)
 	}
 )
 
