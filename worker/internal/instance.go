@@ -81,6 +81,10 @@ type InstanceConfig struct {
 	FunctionPort int
 	BootToken    string
 	MMDSData     map[string]interface{}
+	// NoNetwork launches the VM with no NIC at all: no netns setup, no IP
+	// allocation, no TAP creation/attachment. The guest then has no MMDS, so
+	// callers must not set BootToken/MMDSData for a network-less instance.
+	NoNetwork bool
 
 	// ConsoleWriter, when non-nil, receives the guest's stdout and stderr
 	// instead of the default per-instance telemetry writers. Process jobs use
@@ -160,81 +164,20 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 		}
 	}
 
-	var (
-		inet          *network.InstanceNet
-		tap           *network.TAPDevice
-		tapName, vmIP string
-		err           error
-	)
-
-	if i.netnsMgr != nil {
-		inet, err = i.netnsMgr.Setup(i.ID)
-		if err != nil {
-			return fmt.Errorf("failed to set up isolated network: %w", err)
-		}
-		i.mu.Lock()
-		i.inet = inet
-		i.mu.Unlock()
-		tapName, vmIP = inet.TapName, inet.GuestIP
-		i.setVMIP(vmIP)
-		log.Debug("isolated network ready", "ns", inet.NSName, "guest_ip", vmIP, "gateway", inet.HostIP)
-	} else {
-		vmIP, err = i.bridgeMgr.AllocateVMIP()
-		if err != nil {
-			return fmt.Errorf("failed to allocate IP: %w", err)
-		}
-		i.setVMIP(vmIP)
-		log.Debug("allocated IP", "ip", vmIP)
-
-		tapName = i.bridgeMgr.NextTAPName()
-		tap, err = i.bridgeMgr.CreateTAPDevice(tapName)
-		if err != nil {
-			i.bridgeMgr.ReleaseVMIP(vmIP)
-			i.setVMIP("")
-			return fmt.Errorf("failed to create TAP: %w", err)
-		}
-		i.mu.Lock()
-		i.tap = tap
-		i.mu.Unlock()
-		log.Debug("created TAP", "tap", tapName)
-
-		if err := i.bridgeMgr.AttachTAPToBridge(tap.Name); err != nil {
-			i.bridgeMgr.DeleteTAPDevice(tap.Name)
-			i.bridgeMgr.ReleaseVMIP(vmIP)
-			i.mu.Lock()
-			i.tap = nil
-			i.mu.Unlock()
-			i.setVMIP("")
-			return fmt.Errorf("failed to attach TAP: %w", err)
-		}
+	np, err := i.provisionNetwork(cfg)
+	if err != nil {
+		return err
 	}
-
-	gateway := i.bridgeMgr.GetGatewayIP()
-	guestMask := ""
-	netNSPath := ""
-	if inet != nil {
-		gateway = inet.HostIP
-		guestMask = inet.GuestMask
-		netNSPath = "/var/run/netns/" + inet.NSName
+	i.mu.Lock()
+	i.inet = np.inet
+	i.tap = np.tap
+	i.mu.Unlock()
+	if np.vmIP != "" {
+		i.setVMIP(np.vmIP)
 	}
+	vmIP, tapName := np.vmIP, np.tapName
 
-	vmCfg := vm.Config{
-		KernelPath:    cfg.KernelPath,
-		RootFSPath:    cfg.RuntimePath,
-		Drives:        cfg.Drives,
-		SocketPath:    cfg.SocketPath,
-		VCPUCount:     cfg.VCPUCount,
-		MemSizeMB:     cfg.MemSizeMB,
-		TAPDeviceName: tapName,
-		VMIP:          vmIP,
-		GatewayIP:     gateway,
-		GuestMask:     guestMask,
-		NetNSPath:     netNSPath,
-		BootToken:     cfg.BootToken,
-		MMDSData:      cfg.MMDSData,
-		Stdout:        stdout,
-		Stderr:        stderr,
-	}
+	vmCfg := buildVMConfig(cfg, np, stdout, stderr)
 
 	i.mu.Lock()
 	i.VCPU = cfg.VCPUCount
@@ -259,6 +202,97 @@ func (i *Instance) Start(cfg InstanceConfig) error {
 	go i.monitorVM()
 
 	return nil
+}
+
+// instanceNetwork is the per-instance network state resolved during Start. For
+// an offline (NoNetwork) instance every field is zero.
+type instanceNetwork struct {
+	inet      *network.InstanceNet
+	tap       *network.TAPDevice
+	tapName   string
+	vmIP      string
+	gateway   string
+	guestMask string
+	netNSPath string
+}
+
+// provisionNetwork resolves and installs the instance's networking. With
+// cfg.NoNetwork it is a no-op: no netns setup, no IP allocation and no TAP
+// creation, so the VM boots without a NIC and needs no host privileges. The
+// returned resources are owned by the caller, which stores them (and later
+// releases them via rollbackNetwork/Stop).
+func (i *Instance) provisionNetwork(cfg InstanceConfig) (instanceNetwork, error) {
+	var np instanceNetwork
+	log := logger.With("instance", i.ID, "function", i.FunctionID)
+
+	if cfg.NoNetwork {
+		log.Info("networking disabled, launching VM without a NIC")
+		return np, nil
+	}
+
+	if i.netnsMgr != nil {
+		inet, err := i.netnsMgr.Setup(i.ID)
+		if err != nil {
+			return np, fmt.Errorf("failed to set up isolated network: %w", err)
+		}
+		np.inet = inet
+		np.tapName, np.vmIP = inet.TapName, inet.GuestIP
+		np.gateway, np.guestMask = inet.HostIP, inet.GuestMask
+		np.netNSPath = "/var/run/netns/" + inet.NSName
+		log.Debug("isolated network ready", "ns", inet.NSName, "guest_ip", np.vmIP, "gateway", inet.HostIP)
+		return np, nil
+	}
+
+	vmIP, err := i.bridgeMgr.AllocateVMIP()
+	if err != nil {
+		return np, fmt.Errorf("failed to allocate IP: %w", err)
+	}
+	np.vmIP = vmIP
+	log.Debug("allocated IP", "ip", vmIP)
+
+	tapName := i.bridgeMgr.NextTAPName()
+	tap, err := i.bridgeMgr.CreateTAPDevice(tapName)
+	if err != nil {
+		i.bridgeMgr.ReleaseVMIP(vmIP)
+		np.vmIP = ""
+		return np, fmt.Errorf("failed to create TAP: %w", err)
+	}
+	log.Debug("created TAP", "tap", tapName)
+
+	if err := i.bridgeMgr.AttachTAPToBridge(tap.Name); err != nil {
+		i.bridgeMgr.DeleteTAPDevice(tap.Name)
+		i.bridgeMgr.ReleaseVMIP(vmIP)
+		np.vmIP = ""
+		return np, fmt.Errorf("failed to attach TAP: %w", err)
+	}
+
+	np.tap = tap
+	np.tapName = tapName
+	np.gateway = i.bridgeMgr.GetGatewayIP()
+	return np, nil
+}
+
+// buildVMConfig assembles the Firecracker config for an instance. The network
+// fields come from the resolved instanceNetwork; an offline instance leaves
+// them all empty, which is the no-NIC configuration vm.Manager expects.
+func buildVMConfig(cfg InstanceConfig, np instanceNetwork, stdout, stderr io.Writer) vm.Config {
+	return vm.Config{
+		KernelPath:    cfg.KernelPath,
+		RootFSPath:    cfg.RuntimePath,
+		Drives:        cfg.Drives,
+		SocketPath:    cfg.SocketPath,
+		VCPUCount:     cfg.VCPUCount,
+		MemSizeMB:     cfg.MemSizeMB,
+		TAPDeviceName: np.tapName,
+		VMIP:          np.vmIP,
+		GatewayIP:     np.gateway,
+		GuestMask:     np.guestMask,
+		NetNSPath:     np.netNSPath,
+		BootToken:     cfg.BootToken,
+		MMDSData:      cfg.MMDSData,
+		Stdout:        stdout,
+		Stderr:        stderr,
+	}
 }
 
 // rollbackNetwork undoes whichever network mode was provisioned when a later

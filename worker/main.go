@@ -179,7 +179,11 @@ func main() {
 	if networkMode == "" {
 		networkMode = "bridge"
 	}
-	if networkMode == "netns" {
+	if networkMode == "none" {
+		// Offline mode: network-less microVMs, no root / CAP_NET_ADMIN needed.
+		config.NoNetwork = true
+		logger.Info("network mode: none")
+	} else if networkMode == "netns" {
 		supernet := os.Getenv("NETNS_SUPERNET")
 		if supernet == "" {
 			supernet = "172.31.0.0/16"

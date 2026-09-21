@@ -88,7 +88,11 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	if w.netnsMgr != nil {
+	if w.cfg != nil && w.cfg.NoNetwork {
+		// Offline mode: instances boot with no NIC, so there is no bridge (or
+		// netns) to set up and no host privileges are needed.
+		logger.Info("networking disabled, skipping bridge setup", "mode", "none")
+	} else if w.netnsMgr != nil {
 		logger.Info("network mode", "mode", "netns")
 	} else if err := w.bridgeMgr.EnsureBridge(); err != nil {
 		return fmt.Errorf("failed to ensure bridge: %w", err)
@@ -372,6 +376,23 @@ func jobInflightKey(requestID string) string {
 	return jobInflightKeyPrefix + requestID
 }
 
+// jobExitNonce chooses the exit-code nonce the guest will stamp on its final
+// console line. The guest can only know the nonce if it is delivered via MMDS,
+// so an offline job (no NIC, therefore no metadata service) must use the empty
+// nonce: the supervisor then emits the bare AETHER_EXIT:<code> form and the
+// scanner has to expect exactly that. Minting a nonce that is never delivered
+// makes the sentinel unmatchable, and every offline job is classified as a
+// crash even though it ran to completion.
+func jobExitNonce(job protocol.Job, offline bool) string {
+	if job.ExitNonce != "" {
+		return job.ExitNonce
+	}
+	if offline {
+		return ""
+	}
+	return id.GenerateToken()
+}
+
 // buildJobMMDSData assembles the MMDS payload for a process job. The command
 // is passed through verbatim; timeout_s is always emitted (0 means "no guest
 // deadline"), as is the exit nonce the guest stamps on its final line.
@@ -477,11 +498,19 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		return fail(fmt.Errorf("job cancelled before provisioning: %w", err))
 	}
 
-	nonce := job.ExitNonce
-	if nonce == "" {
-		nonce = id.GenerateToken()
+	nonce := jobExitNonce(job, w.cfg.NoNetwork)
+
+	// MMDS is delivered over the guest's NIC, so a network-less job has no
+	// metadata service. The guest aether-env fails closed when it sees a boot
+	// token but cannot fetch metadata, so offline jobs emit neither a token nor
+	// an MMDS payload. They currently rely on the command baked into the rootfs
+	// /init; config-drive bootstrap for network-less jobs is a later phase.
+	var bootToken string
+	var mmdsData map[string]interface{}
+	if !w.cfg.NoNetwork {
+		bootToken = id.GenerateToken()
+		mmdsData = buildJobMMDSData(bootToken, job, w.cfg.GuestDNS, nonce)
 	}
-	bootToken := id.GenerateToken()
 
 	vcpu := int64(job.VCPU)
 	if vcpu == 0 {
@@ -502,7 +531,8 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		VCPUCount:     vcpu,
 		MemSizeMB:     memMB,
 		BootToken:     bootToken,
-		MMDSData:      buildJobMMDSData(bootToken, job, w.cfg.GuestDNS, nonce),
+		MMDSData:      mmdsData,
+		NoNetwork:     w.cfg.NoNetwork,
 		ConsoleWriter: console,
 	}
 
@@ -652,6 +682,11 @@ func (w *Worker) SpawnInstanceContext(ctx context.Context, functionID string) (*
 		FunctionPort: functionPort,
 		BootToken:    bootToken,
 		MMDSData:     mmdsData,
+		// NoNetwork is threaded through for completeness, but HTTP functions
+		// require a networked mode: without a NIC there is no guest IP to poll
+		// for readiness and no proxy target, so NET_MODE=none is for offline
+		// process jobs only.
+		NoNetwork: w.cfg.NoNetwork,
 	}
 
 	if err := provisionStart(ctx, instance, cfg); err != nil {
