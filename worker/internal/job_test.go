@@ -294,6 +294,112 @@ func TestJobRunnerSentinelWinsOverTimeout(t *testing.T) {
 	}
 }
 
+// While a job runs, the runner must periodically refresh a running record with
+// an advancing HeartbeatAt, and the terminal record must still be written.
+func TestJobRunnerHeartbeatsWhileRunning(t *testing.T) {
+	log := newJobLog(4096, "")
+
+	var mu sync.Mutex
+	var beats []protocol.JobRecord
+	release := make(chan struct{})
+
+	r := NewJobRunner(JobRunnerConfig{
+		JobID:             "job-hb",
+		RequestID:         "req-hb",
+		WorkerID:          "worker-hb",
+		HeartbeatInterval: 5 * time.Millisecond,
+		Log:               log,
+		Wait: func() error {
+			<-release
+			_, _ = log.Write([]byte("AETHER_EXIT:0\n"))
+			return nil
+		},
+		Heartbeat: func(rec protocol.JobRecord) error {
+			mu.Lock()
+			beats = append(beats, rec)
+			mu.Unlock()
+			return nil
+		},
+		Record: func(protocol.JobRecord) error { return nil },
+	})
+
+	done := make(chan protocol.JobRecord, 1)
+	go func() { done <- r.Run(context.Background()) }()
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(beats)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("runner never heartbeated while the job was running")
+		default:
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+
+	close(release)
+	rec := <-done
+
+	if rec.State != protocol.JobStateDone || rec.ExitCode != 0 {
+		t.Fatalf("terminal record = %+v, want done/0", rec)
+	}
+	if rec.HeartbeatAt.IsZero() || rec.HeartbeatAt.Before(rec.StartedAt) {
+		t.Fatalf("terminal heartbeat %v must be at or after start %v", rec.HeartbeatAt, rec.StartedAt)
+	}
+
+	mu.Lock()
+	first := beats[0]
+	count := len(beats)
+	mu.Unlock()
+
+	if first.State != protocol.JobStateRunning {
+		t.Fatalf("heartbeat state = %q, want running", first.State)
+	}
+	if first.JobID != "job-hb" || first.RequestID != "req-hb" || first.WorkerID != "worker-hb" {
+		t.Fatalf("heartbeat lost identifiers: %+v", first)
+	}
+	if first.HeartbeatAt.IsZero() || first.HeartbeatAt.Before(first.StartedAt) {
+		t.Fatalf("heartbeat timestamp %v precedes start %v", first.HeartbeatAt, first.StartedAt)
+	}
+
+	// The ticker must stop once Run returns.
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	after := len(beats)
+	mu.Unlock()
+	if after != count {
+		t.Fatalf("heartbeats continued after Run returned: %d -> %d", count, after)
+	}
+}
+
+// A failing heartbeat write is best-effort and must not change the outcome.
+func TestJobRunnerHeartbeatFailureDoesNotChangeOutcome(t *testing.T) {
+	log := newJobLog(4096, "")
+
+	r := NewJobRunner(JobRunnerConfig{
+		JobID:             "job-hb-fail",
+		HeartbeatInterval: 2 * time.Millisecond,
+		Log:               log,
+		Wait: func() error {
+			time.Sleep(20 * time.Millisecond)
+			_, _ = log.Write([]byte("AETHER_EXIT:5\n"))
+			return nil
+		},
+		Heartbeat: func(protocol.JobRecord) error { return errors.New("etcd down") },
+		Record:    func(protocol.JobRecord) error { return nil },
+	})
+
+	rec := r.Run(context.Background())
+	if rec.State != protocol.JobStateDone || rec.ExitCode != 5 {
+		t.Fatalf("record = %+v, want done/5 despite heartbeat failure", rec)
+	}
+}
+
 func TestJobRunnerRecordingFailureDoesNotChangeOutcome(t *testing.T) {
 	log := newJobLog(4096, "")
 	r := NewJobRunner(JobRunnerConfig{

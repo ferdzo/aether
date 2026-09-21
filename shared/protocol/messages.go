@@ -64,15 +64,19 @@ type Job struct {
 // JobRecord is the durable etcd record of a single process job. It outlives the
 // worker that ran it, so it is never attached to a lease.
 type JobRecord struct {
-	JobID      string    `json:"job_id"`
-	RequestID  string    `json:"request_id,omitempty"`
-	Mode       string    `json:"mode,omitempty"`
-	State      string    `json:"state"`
-	ExitCode   int       `json:"exit_code"`
-	WorkerID   string    `json:"worker_id,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at"`
+	JobID     string    `json:"job_id"`
+	RequestID string    `json:"request_id,omitempty"`
+	Mode      string    `json:"mode,omitempty"`
+	State     string    `json:"state"`
+	ExitCode  int       `json:"exit_code"`
+	WorkerID  string    `json:"worker_id,omitempty"`
+	Error     string    `json:"error,omitempty"`
+	StartedAt time.Time `json:"started_at"`
+	// HeartbeatAt is refreshed periodically while the job is running. It only
+	// *enables* stale detection (a running record whose heartbeat stops
+	// advancing belongs to a dead worker); no reconciler consumes it yet.
+	HeartbeatAt time.Time `json:"heartbeat_at,omitempty"`
+	FinishedAt  time.Time `json:"finished_at"`
 }
 
 // Job lifecycle states. A job starts out provisioning/running and ends in
@@ -107,12 +111,16 @@ type FunctionInstance struct {
 }
 
 const (
-	StreamProvision   = "stream:vm_provision"
-	StreamGroup       = "aether-workers"
-	ChannelCodeUpdate = "channel:code_update"
-	EtcdFuncPrefix    = "/functions/"
-	EtcdWorkerPrefix  = "/workers/"
-	EtcdJobPrefix     = "/jobs/"
+	StreamProvision = "stream:vm_provision"
+	// StreamProvisionDLQ is the dead-letter stream for provision entries that
+	// exceeded the delivery cap. It is never trimmed and has no consumer group:
+	// entries are written and acked on the source stream only.
+	StreamProvisionDLQ = "stream:vm_provision:dlq"
+	StreamGroup        = "aether-workers"
+	ChannelCodeUpdate  = "channel:code_update"
+	EtcdFuncPrefix     = "/functions/"
+	EtcdWorkerPrefix   = "/workers/"
+	EtcdJobPrefix      = "/jobs/"
 )
 
 func InstanceKey(functionID, instanceID string) string {
