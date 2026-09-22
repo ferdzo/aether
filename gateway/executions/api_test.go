@@ -163,6 +163,70 @@ func TestCreateTimeoutIs504(t *testing.T) {
 	}
 }
 
+func TestCreateRejectsOversizedTimeout(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = readyStore("e1")
+	body := fmt.Sprintf(`{"runtime":"exec","workspace_mb":64,"timeout_seconds":%d}`, protocol.MaxTimeoutSeconds+1)
+	if rec := do(t, api, http.MethodPost, "/", body); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateRejectsInvalidID(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = readyStore("e1")
+	if rec := do(t, api, http.MethodPost, "/", `{"runtime":"exec","workspace_mb":64,"timeout_seconds":30,"id":"a/b"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTimeoutErrorBodyIncludesGeneratedID(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.readyTimeout = 30 * time.Millisecond
+	api.pollInterval = 5 * time.Millisecond
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateCreating}, nil
+	}}
+
+	rec := do(t, api, http.MethodPost, "/", `{"runtime":"exec","workspace_mb":64,"timeout_seconds":30}`)
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("got %d want 504", rec.Code)
+	}
+	var body map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not json: %v (%s)", err, rec.Body.String())
+	}
+	if body["id"] == "" {
+		t.Fatalf("timeout body has no id: %v", body)
+	}
+}
+
+func TestGetRejectsInvalidID(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = readyStore("e1")
+	if rec := do(t, api, http.MethodGet, "/a%20b", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProxyMapsWorker401To502(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	api.controlToken = "wrong"
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	if rec := do(t, api, http.MethodPost, "/e1/exec", `{"argv":["true"]}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("got %d want 502 for a worker 401: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateFailedRecordIs502(t *testing.T) {
 	api, _ := newTestAPI(t)
 	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {

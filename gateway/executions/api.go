@@ -24,6 +24,10 @@ import (
 // the request with 502 instead of hanging it.
 const executionRecordTimeout = 2 * time.Second
 
+// maxExecutionBodyBytes bounds a create/exec request body so a large upload
+// cannot make the gateway buffer without bound.
+const maxExecutionBodyBytes = 1 << 20 // 1 MiB
+
 // ErrExecutionNotFound is returned by an ExecutionRecordStore when no record
 // exists for an id, so handlers can map it to 404 separately from a transport
 // error.
@@ -111,6 +115,29 @@ func (api *ExecutionsAPI) Routes() chi.Router {
 	return r
 }
 
+// validExecID applies the same id rules as Create to the path-based handlers,
+// so a crafted id can never reach an etcd key or worker path.
+func validExecID(w http.ResponseWriter, id string) bool {
+	if id == "" {
+		http.Error(w, "execution id is required", http.StatusBadRequest)
+		return false
+	}
+	if err := protocol.ValidJobID(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// writeExecutionError writes a small JSON error that includes the execution id,
+// so a caller that supplied none can still find or destroy the execution an
+// error refers to.
+func writeExecutionError(w http.ResponseWriter, status int, id, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg, "id": id})
+}
+
 // POST /api/executions
 //
 // Creation reuses the existing provision queue: a Mode:"execution" job is
@@ -126,7 +153,7 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMB    int               `json:"workspace_mb"`
 		EnvVars        map[string]string `json:"env_vars"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxExecutionBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -149,6 +176,10 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 	// positive timeout rather than silently allowing an unbounded VM.
 	if req.TimeoutSeconds <= 0 {
 		http.Error(w, "timeout_seconds must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds > protocol.MaxTimeoutSeconds {
+		http.Error(w, fmt.Sprintf("timeout_seconds must be at most %d", protocol.MaxTimeoutSeconds), http.StatusBadRequest)
 		return
 	}
 	// The workspace is where results persist between execs, so it is required.
@@ -200,7 +231,7 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 	rec, err := api.waitReady(ctx, execID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
-			http.Error(w, "execution did not become ready in time", http.StatusGatewayTimeout)
+			writeExecutionError(w, http.StatusGatewayTimeout, execID, "execution did not become ready in time")
 			return
 		}
 		if ctx.Err() != nil {
@@ -208,7 +239,7 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Error("execution failed to become ready", "execution_id", execID, "error", err)
-		http.Error(w, "execution failed", http.StatusBadGateway)
+		writeExecutionError(w, http.StatusBadGateway, execID, "execution failed")
 		return
 	}
 
@@ -248,8 +279,7 @@ func (api *ExecutionsAPI) waitReady(ctx context.Context, execID string) (*protoc
 // GET /api/executions/{id}
 func (api *ExecutionsAPI) Get(w http.ResponseWriter, r *http.Request) {
 	execID := chi.URLParam(r, "id")
-	if execID == "" {
-		http.Error(w, "execution id is required", http.StatusBadRequest)
+	if !validExecID(w, execID) {
 		return
 	}
 	if api.records == nil {
@@ -281,8 +311,7 @@ func (api *ExecutionsAPI) Get(w http.ResponseWriter, r *http.Request) {
 // shell-wrapped.
 func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 	execID := chi.URLParam(r, "id")
-	if execID == "" {
-		http.Error(w, "execution id is required", http.StatusBadRequest)
+	if !validExecID(w, execID) {
 		return
 	}
 
@@ -297,12 +326,20 @@ func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 		Env            map[string]string `json:"env"`
 		TimeoutSeconds int               `json:"timeout_seconds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxExecutionBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	if len(req.Argv) == 0 {
 		http.Error(w, "argv is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds < 0 {
+		http.Error(w, "timeout_seconds must not be negative", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds > protocol.MaxTimeoutSeconds {
+		http.Error(w, fmt.Sprintf("timeout_seconds must be at most %d", protocol.MaxTimeoutSeconds), http.StatusBadRequest)
 		return
 	}
 
@@ -323,8 +360,7 @@ func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/executions/{id}
 func (api *ExecutionsAPI) Delete(w http.ResponseWriter, r *http.Request) {
 	execID := chi.URLParam(r, "id")
-	if execID == "" {
-		http.Error(w, "execution id is required", http.StatusBadRequest)
+	if !validExecID(w, execID) {
 		return
 	}
 
@@ -408,6 +444,15 @@ func (api *ExecutionsAPI) proxy(w http.ResponseWriter, r *http.Request, method, 
 		return
 	}
 	defer resp.Body.Close()
+
+	// A 401 from the worker is the gateway's own misconfiguration (wrong or
+	// missing control token), not the caller's auth failure: the caller already
+	// authenticated at the gateway. Surface it as 502.
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Error("worker rejected the gateway control token", "worker_addr", workerAddr)
+		http.Error(w, "worker rejected control token", http.StatusBadGateway)
+		return
+	}
 
 	if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)

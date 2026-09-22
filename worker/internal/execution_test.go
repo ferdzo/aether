@@ -141,17 +141,23 @@ func TestStartExecutionReadyAndUntracked(t *testing.T) {
 		t.Fatalf("execution leaked into scaler view: TotalInstances=%d", w.TotalInstances())
 	}
 
-	if len(records) != 1 {
-		t.Fatalf("records = %d, want 1", len(records))
+	if len(records) != 2 {
+		t.Fatalf("records = %d, want 2 (creating then ready)", len(records))
 	}
-	if records[0].State != protocol.ExecutionStateReady {
-		t.Fatalf("record state = %q, want ready", records[0].State)
+	if records[0].State != protocol.ExecutionStateCreating {
+		t.Fatalf("record[0] state = %q, want creating", records[0].State)
 	}
-	if records[0].WorkerAddr == "" {
+	if records[0].WorkerID == "" || records[0].WorkerAddr == "" {
+		t.Fatalf("creating record missing worker identity: %+v", records[0])
+	}
+	if records[1].State != protocol.ExecutionStateReady {
+		t.Fatalf("record[1] state = %q, want ready", records[1].State)
+	}
+	if records[1].WorkerAddr == "" {
 		t.Fatal("ready record has no worker address")
 	}
-	if records[0].WorkspacePath != wsPath {
-		t.Fatalf("record workspace = %q, want %q", records[0].WorkspacePath, wsPath)
+	if records[1].WorkspacePath != wsPath {
+		t.Fatalf("record workspace = %q, want %q", records[1].WorkspacePath, wsPath)
 	}
 }
 

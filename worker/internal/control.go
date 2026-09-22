@@ -3,15 +3,25 @@ package internal
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"aether/shared/logger"
 	"aether/shared/protocol"
 )
+
+// maxControlBodyBytes bounds a control-API request body (the exec request).
+const maxControlBodyBytes = 1 << 20 // 1 MiB
+
+// controlReadHeaderTimeout bounds how long a client may take to send request
+// headers, so a stuck client cannot pin a connection goroutine.
+const controlReadHeaderTimeout = 10 * time.Second
 
 // ControlServer is the worker's small HTTP control API for the gateway. It is
 // deliberately minimal: no streaming, no websockets. The gateway proxies
@@ -51,7 +61,13 @@ func (s *ControlServer) Start(addr string) error {
 		return err
 	}
 	s.ln = ln
-	s.srv = &http.Server{Handler: s.Handler()}
+	if s.token == "" {
+		logger.Warn("worker control API is UNSET and therefore unauthenticated; it binds all interfaces and can run arbitrary commands in a guest. Set WORKER_CONTROL_TOKEN to require a bearer token.", "addr", addr)
+	}
+	s.srv = &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: controlReadHeaderTimeout,
+	}
 	go func() {
 		logger.Info("worker control API listening", "addr", addr)
 		if err := s.srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -82,14 +98,27 @@ func (s *ControlServer) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// validControlID applies the same id rules the gateway does, so a path id is
+// always a safe etcd key suffix and file-name element.
+func validControlID(w http.ResponseWriter, id string) bool {
+	if id == "" {
+		http.Error(w, "execution id is required", http.StatusBadRequest)
+		return false
+	}
+	if err := protocol.ValidJobID(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
 // POST /executions/{id}/exec
 //
 // 200 {exit_code, stdout, stderr, timed_out}; 404 unknown; 409 busy; 502 when
 // the guest call fails.
 func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "execution id is required", http.StatusBadRequest)
+	if !validControlID(w, id) {
 		return
 	}
 
@@ -99,12 +128,20 @@ func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		Env            map[string]string `json:"env"`
 		TimeoutSeconds int               `json:"timeout_seconds"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 	if len(req.Argv) == 0 {
 		http.Error(w, "argv is required and must not be empty", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds < 0 {
+		http.Error(w, "timeout_seconds must not be negative", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds > protocol.MaxTimeoutSeconds {
+		http.Error(w, fmt.Sprintf("timeout_seconds must be at most %d", protocol.MaxTimeoutSeconds), http.StatusBadRequest)
 		return
 	}
 
@@ -127,20 +164,24 @@ func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// stdout/stderr are JSON strings, which substitute invalid UTF-8. Callers
+	// that need the exact bytes of a non-UTF-8 output use stdout_b64/stderr_b64
+	// (standard base64), which are byte-exact.
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"exit_code": res.ExitCode,
-		"stdout":    res.Stdout,
-		"stderr":    res.Stderr,
-		"timed_out": res.TimedOut,
+		"exit_code":  res.ExitCode,
+		"stdout":     res.Stdout,
+		"stderr":     res.Stderr,
+		"stdout_b64": base64.StdEncoding.EncodeToString([]byte(res.Stdout)),
+		"stderr_b64": base64.StdEncoding.EncodeToString([]byte(res.Stderr)),
+		"timed_out":  res.TimedOut,
 	})
 }
 
 // DELETE /executions/{id} → destroy; idempotent.
 func (s *ControlServer) handleDestroy(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if id == "" {
-		http.Error(w, "execution id is required", http.StatusBadRequest)
+	if !validControlID(w, id) {
 		return
 	}
 	if err := s.worker.DestroyExecution(id); err != nil {

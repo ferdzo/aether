@@ -1,11 +1,30 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 )
+
+// maxMessageBytes bounds one newline-delimited protocol message. A peer that
+// sends an unterminated line must not be able to grow the heap without bound;
+// the cap is far above any legitimate message (requests are small and output is
+// chunked), so only a buggy or hostile peer can hit it.
+const maxMessageBytes = 4 << 20 // 4 MiB
+
+// MaxExecStreamBytes bounds how much output CollectExec retains per stream
+// (stdout and stderr separately) on the host side. The guest already caps each
+// stream at 1 MiB (see maxStreamBytes in init/exec_service.go); this host-side
+// cap is a second line of defence so a buggy or hostile guest cannot make the
+// worker allocate without bound.
+const MaxExecStreamBytes = 4 << 20 // 4 MiB per stream
+
+// ErrExecOutputTooLarge is returned by CollectExec when a guest exceeds
+// MaxExecStreamBytes on one stream. It is distinct so callers can map it to a
+// guest failure rather than a transport error.
+var ErrExecOutputTooLarge = errors.New("exec output exceeded host cap")
 
 // The exec protocol is newline-delimited JSON: one JSON object per line, in
 // both directions. It is deliberately small and streaming-shaped so richer
@@ -26,6 +45,10 @@ const (
 	TypeReady    = "ready"
 	TypeExec     = "exec"
 	TypeShutdown = "shutdown"
+	// TypeCancel asks the guest to abandon a running exec. It may arrive on the
+	// same control connection while the exec is still streaming events; the
+	// guest kills the exec's process group and reports a terminal event.
+	TypeCancel = "cancel"
 
 	EventStarted = "started"
 	EventStdout  = "stdout"
@@ -70,12 +93,24 @@ type Shutdown struct {
 // may be split across events at arbitrary boundaries. ExitCode and TimedOut
 // are only meaningful on the terminal exited event. Error is set when the
 // service could not run the command at all (for example it was busy).
+//
+// Data is a []byte rather than a string so the wire representation is
+// byte-exact: encoding/json base64-encodes byte slices and decodes them back
+// without loss, whereas a JSON string replaces invalid UTF-8 and cannot carry a
+// chunk boundary that splits a multi-byte rune. Callers that want text can
+// convert with string(ev.Data); callers that need exact bytes use it directly.
+//
+// Busy is set on the terminal event when the guest rejected the exec because
+// another command was already running. It is the authoritative busy signal;
+// callers must not infer busy from ExitCode (125 is also a legitimate command
+// exit status).
 type ExecEvent struct {
 	Type     string `json:"type"`
 	ID       string `json:"id,omitempty"`
-	Data     string `json:"data,omitempty"`
+	Data     []byte `json:"data,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
+	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -111,6 +146,9 @@ func ReadMessage(r io.Reader, v any) error {
 				break
 			}
 			line = append(line, one[0])
+			if len(line) > maxMessageBytes {
+				return fmt.Errorf("exec protocol: message exceeds %d bytes", maxMessageBytes)
+			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -129,12 +167,16 @@ func ReadMessage(r io.Reader, v any) error {
 }
 
 // ExecResult is the aggregate outcome of a single exec, assembled from its
-// event stream.
+// event stream. Stdout and Stderr are raw bytes held in strings (a Go string
+// can hold arbitrary bytes); converting them to text may substitute invalid
+// UTF-8, so callers that need exact bytes must consume the event stream rather
+// than this aggregate.
 type ExecResult struct {
 	ExitCode int
 	Stdout   string
 	Stderr   string
 	TimedOut bool
+	Busy     bool
 	Error    string
 }
 
@@ -146,9 +188,13 @@ type ExecResult struct {
 // the connection closed early.
 func CollectExec(r io.Reader, id string) (ExecResult, error) {
 	var res ExecResult
+	var stdout, stderr bytes.Buffer
+	over := false
 	for {
 		var ev ExecEvent
 		if err := ReadMessage(r, &ev); err != nil {
+			res.Stdout = stdout.String()
+			res.Stderr = stderr.String()
 			return res, err
 		}
 		if id != "" && ev.ID != "" && ev.ID != id {
@@ -156,13 +202,27 @@ func CollectExec(r io.Reader, id string) (ExecResult, error) {
 		}
 		switch ev.Type {
 		case EventStdout:
-			res.Stdout += ev.Data
+			if stdout.Len()+len(ev.Data) > MaxExecStreamBytes {
+				over = true
+			} else {
+				stdout.Write(ev.Data)
+			}
 		case EventStderr:
-			res.Stderr += ev.Data
+			if stderr.Len()+len(ev.Data) > MaxExecStreamBytes {
+				over = true
+			} else {
+				stderr.Write(ev.Data)
+			}
 		case EventExited:
+			res.Stdout = stdout.String()
+			res.Stderr = stderr.String()
 			res.ExitCode = ev.ExitCode
 			res.TimedOut = ev.TimedOut
+			res.Busy = ev.Busy
 			res.Error = ev.Error
+			if over {
+				return res, ErrExecOutputTooLarge
+			}
 			return res, nil
 		}
 	}

@@ -69,6 +69,7 @@ func TestSubmitValidation(t *testing.T) {
 		{"timeout omitted", `{"runtime":"job","command":["true"]}`},
 		{"zero timeout", `{"runtime":"job","command":["true"],"timeout_seconds":0}`},
 		{"negative timeout", `{"runtime":"job","command":["true"],"timeout_seconds":-1}`},
+		{"oversized timeout", fmt.Sprintf(`{"runtime":"job","command":["true"],"timeout_seconds":%d}`, protocol.MaxTimeoutSeconds+1)},
 		// An id that could not be fetched back, or that makes an awkward etcd key.
 		{"id with slash", `{"runtime":"job","command":["true"],"timeout_seconds":30,"id":"a/b"}`},
 		{"id with whitespace", `{"runtime":"job","command":["true"],"timeout_seconds":30,"id":"a b"}`},

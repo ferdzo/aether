@@ -17,7 +17,9 @@ import (
 const execServicePort = 5252
 
 // guestBusyExitCode is the exit code the guest reports when it already has an
-// exec running on another control connection (init/exec_service.go).
+// exec running on another control connection (init/exec_service.go). It is not
+// the busy signal: 125 is also a legitimate command exit status, so callers
+// must key off ExecEvent.Busy (surfaced as ExecResult.Busy).
 const guestBusyExitCode = 125
 
 // execConnectTimeout bounds the Firecracker CONNECT acknowledgement.
@@ -112,6 +114,10 @@ func (c *execClient) exec(ctx context.Context, id string, req protocol.ExecReque
 	go func() {
 		select {
 		case <-ctx.Done():
+			// Ask the guest to abandon the exec (it kills the process group),
+			// then unblock the read. An abandoned exec must not run to
+			// completion in the guest.
+			_ = protocol.WriteMessage(c.conn, protocol.ExecRequest{Type: protocol.TypeCancel, ID: id})
 			_ = c.conn.SetDeadline(time.Now())
 		case <-stop:
 		}
@@ -122,7 +128,9 @@ func (c *execClient) exec(ctx context.Context, id string, req protocol.ExecReque
 	if err != nil {
 		return res, err
 	}
-	if res.ExitCode == guestBusyExitCode || strings.Contains(strings.ToLower(res.Error), "busy") {
+	// Busy is signalled explicitly by the guest. Exit code 125 alone is not
+	// busy: `sh -c 'exit 125'` is a normal result and its output is real.
+	if res.Busy {
 		return res, fmt.Errorf("%w: %s", errGuestBusy, res.Error)
 	}
 	return res, nil

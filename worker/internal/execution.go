@@ -16,7 +16,41 @@ import (
 	"aether/shared/logger"
 	"aether/shared/protocol"
 	"aether/shared/vm"
+
+	etcd "go.etcd.io/etcd/client/v3"
 )
+
+// saturatedTimeout converts a seconds value to a Duration without overflowing.
+// Values above protocol.MaxTimeoutSeconds are clamped; non-positive values map
+// to zero (no timeout). This is the last line of defence for a caller that
+// bypassed the gateway and control-API validation and wrote the stream
+// directly.
+func saturatedTimeout(seconds int) time.Duration {
+	return time.Duration(clampTimeoutSeconds(seconds)) * time.Second
+}
+
+// clampTimeoutSeconds bounds a seconds value to [0, MaxTimeoutSeconds] so it can
+// safely be converted to a Duration or forwarded to the guest.
+func clampTimeoutSeconds(seconds int) int {
+	if seconds <= 0 {
+		return 0
+	}
+	if seconds > protocol.MaxTimeoutSeconds {
+		return protocol.MaxTimeoutSeconds
+	}
+	return seconds
+}
+
+// removeExecutionSocket removes an execution's vsock bridge socket. It is
+// best-effort and tolerates a missing file.
+func removeExecutionSocket(dir, id string) {
+	if dir == "" || id == "" {
+		return
+	}
+	if err := os.Remove(filepath.Join(dir, id+".vsock")); err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to remove execution vsock socket", "execution_id", id, "error", err)
+	}
+}
 
 // executionReadyTimeout bounds how long the worker waits for the guest exec
 // service handshake after the VM process has launched. There is no HTTP probe:
@@ -27,6 +61,11 @@ const executionReadyTimeout = 60 * time.Second
 // unset. The gateway dials the owning worker's WorkerAddr (worker IP + this
 // port) to exec and destroy executions.
 const defaultControlPort = 9091
+
+// executionScanTimeout bounds the startup etcd prefix scan (reconcile, and the
+// workspace-GC live-execution cross-check) so an unreachable etcd cannot delay
+// worker startup indefinitely.
+const executionScanTimeout = 2 * time.Second
 
 // Errors returned by the execution exec path so the control API can map them to
 // distinct status codes (404 unknown, 409 busy, 502 guest failure).
@@ -137,10 +176,34 @@ func (r *Registry) GetExecution(id string) (protocol.ExecutionRecord, error) {
 	return rec, nil
 }
 
+// ListExecutions returns every durable execution record. It is used at worker
+// startup to reconcile records left behind by a previous worker process.
+func (r *Registry) ListExecutions(ctx context.Context) ([]protocol.ExecutionRecord, error) {
+	resp, err := r.client.Get(ctx, protocol.EtcdExecutionPrefix, etcd.WithPrefix())
+	if err != nil {
+		return nil, fmt.Errorf("failed to list execution records: %w", err)
+	}
+	recs := make([]protocol.ExecutionRecord, 0, len(resp.Kvs))
+	for _, kv := range resp.Kvs {
+		var rec protocol.ExecutionRecord
+		if err := json.Unmarshal(kv.Value, &rec); err != nil {
+			logger.Warn("skipping unreadable execution record", "key", string(kv.Key), "error", err)
+			continue
+		}
+		recs = append(recs, rec)
+	}
+	return recs, nil
+}
+
 // Seams so unit tests can exercise the lifecycle without etcd.
 var (
 	putExecution = func(r *Registry, rec protocol.ExecutionRecord) error { return r.PutExecution(rec) }
 	getExecution = func(r *Registry, id string) (protocol.ExecutionRecord, error) { return r.GetExecution(id) }
+	// listExecutions is the startup reconcile scan. Tests override it to avoid
+	// etcd.
+	listExecutions = func(r *Registry, ctx context.Context) ([]protocol.ExecutionRecord, error) {
+		return r.ListExecutions(ctx)
+	}
 	// execOnGuest runs one command against the guest service. Tests override it
 	// to avoid a real VM.
 	execOnGuest = runExecOnGuest
@@ -165,15 +228,117 @@ func (w *Worker) getExecutionRecord(id string) (protocol.ExecutionRecord, error)
 	return getExecution(w.registry, id)
 }
 
+// reconcileExecutions marks execution records owned by this worker that are not
+// terminal as failed at startup. A worker that crashed or restarted leaves its
+// records at creating/ready/stopping forever; without this the gateway's
+// DELETE would keep proxying to a dead control port and the record would never
+// reach a terminal state. The orphaned VM on this host is gone with the worker,
+// so the failed record is accurate.
+//
+// Limitation: records owned by a *different*, still-dead worker are deliberately
+// not touched. Execution records carry no lease, so there is no safe way for
+// this worker to know the peer is gone; those orphans stay ready until their
+// lifetime timer expires. Cross-worker reclamation would need a lease or a
+// liveness check and is out of scope here.
+func (w *Worker) reconcileExecutions(ctx context.Context) {
+	if w == nil || w.registry == nil || w.cfg == nil {
+		return
+	}
+	sctx, cancel := context.WithTimeout(ctx, executionScanTimeout)
+	defer cancel()
+	recs, err := listExecutions(w.registry, sctx)
+	if err != nil {
+		logger.Warn("failed to list executions for startup reconcile", "error", err)
+		return
+	}
+	me := w.workerID()
+	for _, rec := range recs {
+		if ctx.Err() != nil {
+			return
+		}
+		switch rec.State {
+		case protocol.ExecutionStateCreating, protocol.ExecutionStateReady, protocol.ExecutionStateStopping:
+		default:
+			continue
+		}
+		if me != "" && rec.WorkerID != "" && rec.WorkerID != me {
+			continue
+		}
+		failed := protocol.ExecutionRecord{
+			ID:            rec.ID,
+			State:         protocol.ExecutionStateFailed,
+			WorkerID:      w.workerID(),
+			WorkerAddr:    rec.WorkerAddr,
+			WorkspacePath: rec.WorkspacePath,
+			Error:         "worker restarted before the execution reached a terminal state",
+			StartedAt:     rec.StartedAt,
+			FinishedAt:    time.Now().UTC(),
+		}
+		if err := w.putExecutionRecord(failed); err != nil {
+			logger.Error("failed to reconcile execution record", "execution_id", rec.ID, "error", err)
+			continue
+		}
+		removeExecutionSocket(w.cfg.SocketDir, rec.ID)
+		logger.Warn("reconciled orphaned execution to failed", "execution_id", rec.ID, "previous_state", rec.State)
+	}
+}
+
+// removeStaleExecutionWorkspace deletes the workspace image of a stopped
+// execution with the same id, so POST -> DELETE -> POST with the same id can
+// rebuild it. CreateWorkspace refuses to reuse an existing file, and the
+// durable guard explicitly allows re-creating a stopped id, so without this the
+// recreate would fail until the TTL GC runs.
+//
+// Only a *stopped* record is reclaimed. A failed record may have been written
+// by a duplicate attempt whose workspace path aliases a live execution's image
+// (the id is shared), so removing on failed could unlink a running execution's
+// workspace. Failures before registration already remove their own image.
+func (w *Worker) removeStaleExecutionWorkspace(id string) {
+	if w.cfg == nil {
+		return
+	}
+	rec, err := w.getExecutionRecord(id)
+	if err != nil {
+		return
+	}
+	if rec.State != protocol.ExecutionStateStopped {
+		return
+	}
+	path := rec.WorkspacePath
+	if path == "" {
+		path = filepath.Join(w.cfg.WorkspaceDir, id+workspaceImageSuffix)
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		logger.Warn("failed to remove stale execution workspace", "execution_id", id, "path", path, "error", err)
+	}
+}
+
 // --- worker execution registry ----------------------------------------------
 
-func (w *Worker) registerExecution(e *Execution) {
+// registerExecution adds e to the live execution map. It refuses an id that is
+// already registered (stopping the newcomer so it cannot become an orphan whose
+// VM no record points at) and refuses once the worker is shutting down. It
+// reports whether e was registered.
+func (w *Worker) registerExecution(e *Execution) bool {
 	w.mu.Lock()
+	if w.shuttingDown {
+		w.mu.Unlock()
+		_ = e.instance.Stop()
+		return false
+	}
 	if w.executions == nil {
 		w.executions = make(map[string]*Execution)
 	}
+	if existing, ok := w.executions[e.ID]; ok && existing != nil {
+		w.mu.Unlock()
+		// A duplicate already owns this id: stop the newcomer's VM now rather
+		// than overwriting the map entry and orphaning it.
+		_ = e.instance.Stop()
+		return false
+	}
 	w.executions[e.ID] = e
 	w.mu.Unlock()
+	return true
 }
 
 func (w *Worker) lookupExecution(id string) *Execution {
@@ -256,7 +421,38 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		}
 	}
 
+	// A creating record is written before any VM work. It gives the gateway a
+	// non-terminal state to poll (so a provisioning failure is reported as 502
+	// rather than discovered only by a 504 timeout), and it closes the durable
+	// dedup hole where a second create for the same id saw no record and
+	// launched a second VM.
+	startedAt := time.Now().UTC()
+	creating := protocol.ExecutionRecord{
+		ID:         execID,
+		State:      protocol.ExecutionStateCreating,
+		WorkerID:   w.workerID(),
+		WorkerAddr: w.controlAddr(),
+		StartedAt:  startedAt,
+	}
+	if err := w.putExecutionRecord(creating); err != nil {
+		log.Error("failed to record creating execution", "error", err)
+	}
+
+	// fail records the terminal failure (best effort), releases the in-flight
+	// marker so a redelivery can retry, and returns the original error.
 	fail := func(err error) error {
+		failed := protocol.ExecutionRecord{
+			ID:         execID,
+			State:      protocol.ExecutionStateFailed,
+			WorkerID:   w.workerID(),
+			WorkerAddr: w.controlAddr(),
+			Error:      err.Error(),
+			StartedAt:  startedAt,
+			FinishedAt: time.Now().UTC(),
+		}
+		if putErr := w.putExecutionRecord(failed); putErr != nil {
+			log.Error("failed to record failed execution", "error", putErr)
+		}
 		if job.RequestID != "" {
 			dctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
@@ -286,9 +482,12 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 
 	// Workspace: create the backing image before launch. A declared drive that
 	// does not exist is a hard Firecracker error, so a creation failure is a
-	// provisioning failure and must not ACK.
+	// provisioning failure and must not ACK. A terminal record for this id
+	// (stopped/failed) left a retained image behind; remove it so POST ->
+	// DELETE -> POST with the same id can rebuild.
 	var workspacePath string
 	if job.WorkspaceMB > 0 {
+		w.removeStaleExecutionWorkspace(execID)
 		wsPath, err := createJobWorkspace(w.cfg.WorkspaceDir, execID, job.WorkspaceMB)
 		if err != nil {
 			return fail(fmt.Errorf("failed to create execution workspace: %w", err))
@@ -333,6 +532,26 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		cfg.Drives = []vm.DriveSpec{{Path: workspacePath, ReadOnly: false}}
 	}
 
+	exec := &Execution{
+		ID:            execID,
+		instance:      instance,
+		workspacePath: workspacePath,
+		vsockPath:     vsockPath,
+		workerAddr:    w.controlAddr(),
+		startedAt:     startedAt,
+	}
+
+	// Watch for guest death. instance.Stop sets a stopping status, so the
+	// callback only fires on an unexpected exit; if the execution is registered
+	// by then, tear it down so the record does not stay ready (and execs do not
+	// keep failing with 502) until the lifetime expires.
+	instance.SetVMDeathCallback(func(_, _ string) {
+		log.Warn("execution VM died unexpectedly, destroying execution")
+		if err := w.destroyExecutionFor(execID, exec); err != nil {
+			log.Warn("failed to destroy dead execution", "error", err)
+		}
+	})
+
 	if err := provisionStart(ctx, instance, cfg); err != nil {
 		_ = instance.Stop()
 		removeExecutionWorkspace(workspacePath)
@@ -346,16 +565,23 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		return fail(fmt.Errorf("execution not ready: %w", err))
 	}
 
-	started := time.Now().UTC()
-	exec := &Execution{
-		ID:            execID,
-		instance:      instance,
-		workspacePath: workspacePath,
-		vsockPath:     vsockPath,
-		workerAddr:    w.controlAddr(),
-		startedAt:     started,
+	if !w.registerExecution(exec) {
+		// The id is already owned (a duplicate create) or the worker is
+		// shutting down. registerExecution stopped this newcomer's VM; do not
+		// touch the shared workspace image. ACK so the entry does not loop.
+		log.Warn("execution id already registered or worker shutting down, dropping")
+		return nil
 	}
-	w.registerExecution(exec)
+
+	// Record ready only if a concurrent destroy has not already stopped it, so
+	// a late ready write cannot resurrect a dead execution.
+	exec.mu.Lock()
+	stopped := exec.stopped
+	exec.mu.Unlock()
+	if stopped {
+		log.Warn("execution stopped during provisioning, not recording ready")
+		return nil
+	}
 
 	rec := protocol.ExecutionRecord{
 		ID:            execID,
@@ -363,7 +589,7 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		WorkerID:      w.workerID(),
 		WorkerAddr:    w.controlAddr(),
 		WorkspacePath: workspacePath,
-		StartedAt:     started,
+		StartedAt:     startedAt,
 	}
 	if err := w.putExecutionRecord(rec); err != nil {
 		// Recording is best-effort: the VM is up and serving; a registry hiccup
@@ -372,16 +598,20 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 	}
 
 	// Optional lifetime: destroy the execution when it expires. The timer is
-	// owned by the Worker, not by the provisioning ctx, so the execution is not
-	// tied to the request that created it.
-	if job.TimeoutSeconds > 0 {
+	// owned by the Worker, not by the provisioning ctx. Installing it under
+	// exec.mu and re-checking stopped closes the race with a concurrent
+	// destroy; the callback re-checks identity so a stale timer can never
+	// destroy a later execution that reused the id.
+	if d := saturatedTimeout(job.TimeoutSeconds); d > 0 {
 		exec.mu.Lock()
-		exec.lifetime = time.AfterFunc(time.Duration(job.TimeoutSeconds)*time.Second, func() {
-			log.Info("execution lifetime expired, destroying")
-			if err := w.destroyExecution(execID); err != nil {
-				log.Warn("failed to destroy expired execution", "error", err)
-			}
-		})
+		if !exec.stopped {
+			exec.lifetime = time.AfterFunc(d, func() {
+				log.Info("execution lifetime expired, destroying")
+				if err := w.destroyExecutionFor(execID, exec); err != nil {
+					log.Warn("failed to destroy expired execution", "error", err)
+				}
+			})
+		}
 		exec.mu.Unlock()
 	}
 
@@ -434,6 +664,18 @@ func (w *Worker) destroyExecution(id string) error {
 	if err := exec.instance.Stop(); err != nil {
 		log.Warn("failed to stop execution instance", "error", err)
 	}
+	// The vsock bridge socket is only removed opportunistically today; remove
+	// it explicitly now that the VMM is gone so it cannot be reused or leak.
+	socketDir := ""
+	if w.cfg != nil {
+		socketDir = w.cfg.SocketDir
+	}
+	removeExecutionSocket(socketDir, id)
+	if exec.vsockPath != "" {
+		if err := os.Remove(exec.vsockPath); err != nil && !os.IsNotExist(err) {
+			log.Warn("failed to remove execution vsock socket", "path", exec.vsockPath, "error", err)
+		}
+	}
 
 	rec := protocol.ExecutionRecord{
 		ID:            id,
@@ -457,18 +699,44 @@ func (w *Worker) DestroyExecution(id string) error {
 	return w.destroyExecution(id)
 }
 
-// destroyAllExecutions stops every live execution; called on worker shutdown.
-func (w *Worker) destroyAllExecutions() {
+// destroyExecutionFor tears down id only if it is still the expected execution.
+// A nil expected matches whatever is currently registered. It is used by the
+// lifetime timer and the VM-death callback so a stale timer/callback can never
+// destroy a different execution that reused the id.
+func (w *Worker) destroyExecutionFor(id string, expected *Execution) error {
 	w.mu.Lock()
-	ids := make([]string, 0, len(w.executions))
-	for id := range w.executions {
-		ids = append(ids, id)
+	cur, ok := w.executions[id]
+	if !ok || (expected != nil && cur != expected) {
+		w.mu.Unlock()
+		return nil
 	}
 	w.mu.Unlock()
+	return w.destroyExecution(id)
+}
 
-	for _, id := range ids {
-		if err := w.destroyExecution(id); err != nil {
-			logger.Warn("failed to destroy execution on shutdown", "execution_id", id, "error", err)
+// destroyAllExecutions stops every live execution; called on worker shutdown.
+// It sets shuttingDown first so registerExecution refuses (and stops) anything
+// racing shutdown, then loops until the map is empty rather than snapshotting,
+// so an execution registered just before the flag is still destroyed.
+func (w *Worker) destroyAllExecutions() {
+	w.mu.Lock()
+	w.shuttingDown = true
+	w.mu.Unlock()
+
+	for {
+		w.mu.Lock()
+		ids := make([]string, 0, len(w.executions))
+		for id := range w.executions {
+			ids = append(ids, id)
+		}
+		w.mu.Unlock()
+		if len(ids) == 0 {
+			return
+		}
+		for _, id := range ids {
+			if err := w.destroyExecution(id); err != nil {
+				logger.Warn("failed to destroy execution on shutdown", "execution_id", id, "error", err)
+			}
 		}
 	}
 }

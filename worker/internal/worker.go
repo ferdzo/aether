@@ -72,6 +72,10 @@ type Worker struct {
 	// kept out of instances: jobs are invisible to the scaler and never
 	// registered as function instances.
 	jobs map[string]*JobRunner
+
+	// shuttingDown is set once shutdown starts; registerExecution refuses new
+	// executions after it so a VM cannot be created concurrently with teardown.
+	shuttingDown bool
 }
 
 func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClient *redis.Client) *Worker {
@@ -112,7 +116,17 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	if err := w.ensureStreamGroup(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("failed to create consumer group: %w", err)
+	}
+
+	// Reconcile after the consumer group exists but before consuming: records
+	// left by a previous worker process are marked terminal so a redelivery
+	// cannot adopt a dead execution.
+	if w.cfg != nil {
+		w.reconcileExecutions(ctx)
 	}
 
 	go w.claimStaleJobs(ctx)
@@ -124,7 +138,37 @@ func (w *Worker) Run(ctx context.Context) error {
 // deliberately best-effort: a GC failure must never stop the worker from
 // serving jobs, and a fresh worker with no WorkspaceDir has nothing to sweep.
 func (w *Worker) gcWorkspaces() {
-	removed, err := GCWorkspaces(w.cfg.WorkspaceDir, w.cfg.WorkspaceTTL)
+	// Never sweep a workspace belonging to a non-terminal execution: the TTL
+	// alone is not enough for a long-lived execution. The predicate is derived
+	// from the durable records; if the scan fails we fall back to TTL-only GC
+	// (best effort) rather than skipping GC entirely.
+	var keep func(string) bool
+	if w.registry != nil && w.cfg.WorkspaceTTL > 0 {
+		sctx, cancel := context.WithTimeout(context.Background(), executionScanTimeout)
+		defer cancel()
+		if recs, err := listExecutions(w.registry, sctx); err == nil {
+			live := make(map[string]bool)
+			for _, rec := range recs {
+				switch rec.State {
+				case protocol.ExecutionStateCreating, protocol.ExecutionStateReady, protocol.ExecutionStateStopping:
+				default:
+					continue
+				}
+				if rec.WorkspacePath != "" {
+					live[filepath.Base(rec.WorkspacePath)] = true
+				} else if rec.ID != "" {
+					live[rec.ID+workspaceImageSuffix] = true
+				}
+			}
+			if len(live) > 0 {
+				keep = func(name string) bool { return live[name] }
+			}
+		} else {
+			logger.Warn("workspace GC could not cross-check live executions; falling back to TTL-only", "error", err)
+		}
+	}
+
+	removed, err := GCWorkspacesExcept(w.cfg.WorkspaceDir, w.cfg.WorkspaceTTL, keep)
 	switch {
 	case err != nil:
 		logger.Warn("workspace GC completed with errors", "dir", w.cfg.WorkspaceDir, "removed", removed, "error", err)
@@ -603,6 +647,9 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 	if jobID == "" {
 		jobID = job.RequestID
 	}
+	// A stream written directly can bypass the API's ceiling; saturate rather
+	// than letting the int->Duration conversion overflow into a negative value.
+	job.TimeoutSeconds = clampTimeoutSeconds(job.TimeoutSeconds)
 	log := logger.With("job_id", jobID, "request_id", job.RequestID)
 	log.Info("received process job", "command", job.Command, "timeout_s", job.TimeoutSeconds)
 

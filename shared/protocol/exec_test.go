@@ -72,8 +72,8 @@ func TestReadMessageMultipleInOneRead(t *testing.T) {
 	var buf bytes.Buffer
 	for _, ev := range []ExecEvent{
 		{Type: EventStarted, ID: "1"},
-		{Type: EventStdout, ID: "1", Data: "hello\n"},
-		{Type: EventStderr, ID: "1", Data: "oops\n"},
+		{Type: EventStdout, ID: "1", Data: []byte("hello\n")},
+		{Type: EventStderr, ID: "1", Data: []byte("oops\n")},
 		{Type: EventExited, ID: "1", ExitCode: 3, TimedOut: true},
 	} {
 		if err := WriteMessage(&buf, ev); err != nil {
@@ -121,11 +121,11 @@ func TestCollectExecSeparatesStreams(t *testing.T) {
 	// the collector together.
 	first := bytes.Buffer{}
 	_ = WriteMessage(&first, ExecEvent{Type: EventStarted, ID: "e1"})
-	_ = WriteMessage(&first, ExecEvent{Type: EventStdout, ID: "e1", Data: "out-1"})
-	_ = WriteMessage(&first, ExecEvent{Type: EventStderr, ID: "e1", Data: "err-1"})
+	_ = WriteMessage(&first, ExecEvent{Type: EventStdout, ID: "e1", Data: []byte("out-1")})
+	_ = WriteMessage(&first, ExecEvent{Type: EventStderr, ID: "e1", Data: []byte("err-1")})
 
 	var second bytes.Buffer
-	_ = WriteMessage(&second, ExecEvent{Type: EventStdout, ID: "e1", Data: "out-2"})
+	_ = WriteMessage(&second, ExecEvent{Type: EventStdout, ID: "e1", Data: []byte("out-2")})
 	_ = WriteMessage(&second, ExecEvent{Type: EventExited, ID: "e1", ExitCode: 42, TimedOut: true})
 
 	r := &chunkReader{data: append(append([]byte(nil), first.Bytes()...), second.Bytes()...), n: 5}
@@ -144,11 +144,91 @@ func TestCollectExecSeparatesStreams(t *testing.T) {
 	}
 }
 
+// Data must survive the wire byte-for-byte, including invalid UTF-8, and a
+// valid multi-byte rune split across two events must not be corrupted.
+func TestExecEventDataIsByteExact(t *testing.T) {
+	invalid := []byte{0xff, 0xfe, 0x00, 0x41, 0x80}
+	// "é" is 0xC3 0xA9; split it between two events.
+	splitRune := []byte{'x', 0xc3, 0xa9, 'y'}
+
+	var buf bytes.Buffer
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "b", Data: invalid})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "b", Data: splitRune[:2]})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "b", Data: splitRune[2:]})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "b", ExitCode: 0})
+
+	got, err := CollectExec(bytes.NewReader(buf.Bytes()), "b")
+	if err != nil {
+		t.Fatalf("CollectExec: %v", err)
+	}
+	want := string(invalid) + string(splitRune)
+	if got.Stdout != want {
+		t.Fatalf("Stdout = %q (% x), want %q (% x)", got.Stdout, []byte(got.Stdout), want, []byte(want))
+	}
+}
+
+// The busy flag must round-trip and is the only busy signal CollectExec reports.
+func TestExecEventBusyRoundTrip(t *testing.T) {
+	var buf bytes.Buffer
+	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "z", ExitCode: 125, Busy: true, Error: "exec service busy"})
+
+	got, err := CollectExec(bytes.NewReader(buf.Bytes()), "z")
+	if err != nil {
+		t.Fatalf("CollectExec: %v", err)
+	}
+	if !got.Busy {
+		t.Fatalf("Busy = false, want true (ExitCode=%d)", got.ExitCode)
+	}
+}
+
+// A plain exit 125 must not be reported as busy.
+func TestExecEventExit125IsNotBusy(t *testing.T) {
+	var buf bytes.Buffer
+	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "z", ExitCode: 125})
+
+	got, err := CollectExec(bytes.NewReader(buf.Bytes()), "z")
+	if err != nil {
+		t.Fatalf("CollectExec: %v", err)
+	}
+	if got.Busy {
+		t.Fatal("Busy = true for a plain exit 125, want false")
+	}
+}
+
+// CollectExec must stop retaining output past the host cap and say so.
+func TestCollectExecCapsOutput(t *testing.T) {
+	var buf bytes.Buffer
+	chunk := make([]byte, 1<<20)
+	for i := range chunk {
+		chunk[i] = 'a'
+	}
+	for i := 0; i < 6; i++ { // 6 MiB, over the 4 MiB cap
+		_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "big", Data: chunk})
+	}
+	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "big"})
+
+	got, err := CollectExec(bytes.NewReader(buf.Bytes()), "big")
+	if !errors.Is(err, ErrExecOutputTooLarge) {
+		t.Fatalf("err = %v, want ErrExecOutputTooLarge", err)
+	}
+	if len(got.Stdout) > MaxExecStreamBytes {
+		t.Fatalf("retained %d bytes, want <= %d", len(got.Stdout), MaxExecStreamBytes)
+	}
+}
+
+// An unterminated line beyond the message cap must be rejected, not buffered.
+func TestReadMessageRejectsOversizedLine(t *testing.T) {
+	r := io.MultiReader(bytes.NewReader(bytes.Repeat([]byte("a"), maxMessageBytes+1)), strings.NewReader(""))
+	if err := ReadMessage(r, &Ready{}); err == nil {
+		t.Fatal("oversized unterminated message must be rejected")
+	}
+}
+
 // CollectExec must ignore events belonging to another exec.
 func TestCollectExecIgnoresOtherIDs(t *testing.T) {
 	var buf bytes.Buffer
-	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "other", Data: "noise"})
-	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "mine", Data: "mine"})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "other", Data: []byte("noise")})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "mine", Data: []byte("mine")})
 	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "mine", ExitCode: 0})
 
 	got, err := CollectExec(bytes.NewReader(buf.Bytes()), "mine")

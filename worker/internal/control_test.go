@@ -142,6 +142,27 @@ func TestControlDestroyIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestControlExecRejectsOversizedTimeout(t *testing.T) {
+	w := newJobWorker(t)
+	registerTestExecution(w, "c8")
+	rec := controlDo(t, NewControlServer(w, "").Handler(), http.MethodPost, "/executions/c8/exec",
+		`{"argv":["true"],"timeout_seconds":99999999999}`, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestControlRejectsInvalidID(t *testing.T) {
+	w := newJobWorker(t)
+	h := NewControlServer(w, "").Handler()
+	if rec := controlDo(t, h, http.MethodPost, "/executions/a%20b/exec", `{"argv":["true"]}`, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("exec invalid id status = %d, want 400", rec.Code)
+	}
+	if rec := controlDo(t, h, http.MethodDelete, "/executions/a%20b", "", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("destroy invalid id status = %d, want 400", rec.Code)
+	}
+}
+
 func TestControlAuth(t *testing.T) {
 	w := newJobWorker(t)
 	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
