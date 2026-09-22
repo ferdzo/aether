@@ -36,6 +36,8 @@ else is marked unverified on purpose.
 | netns addressing | Structural test: guest gateway on the in-namespace bridge, TAP attached, host route for the guest /30, `ip_forward=1` in the namespace | yes |
 | Firecracker + kernel | Real boots on Firecracker **v1.17.0**, guest kernel **6.18.48** | — |
 | Ordered drives | Real VM with the `rootfs` device plus an extra read-only drive attached in order | no |
+| Jobs HTTP API | A job submitted over HTTP (`POST /api/jobs`) booted a real VM and completed with `exit_code=42`. `scripts/e2e-job-api.sh` | no |
+| Job workspace | A job wrote `/workspace/proof.txt`; after the VM was destroyed the host recovered the contents from the workspace image. `scripts/e2e-job-workspace.sh` | no |
 | MMDS bootstrap + fail-closed init | Demonstrated by the egress run: the guest loaded metadata and ran the entrypoint instead of bailing | yes |
 
 **Not verified:**
@@ -145,6 +147,16 @@ Dispatch, idempotency (durable job record plus a Redis in-flight marker),
 durable outcome recording, and ACK at spawn. See "Verification Status" for the
 real end-to-end evidence.
 
+### Workspaces
+
+A job can request `workspace_mb`. The worker builds a per-job ext4 before boot and
+attaches it as the first configured drive, so the guest sees it as writable
+`/dev/vdb`; the job rootfs `/init` mounts it at `/workspace` and uses it as HOME
+and cwd. The image is retained after the VM exits and its host path is recorded
+as `workspace_path` on the job record. `WORKSPACE_TTL` (default 24h, 0 disables)
+drives a GC sweep at worker startup. Jobs that do not ask for a workspace are
+unaffected.
+
 ### Networking
 - `bridge` (default): one bridge, a TAP per VM, static guest IP from the kernel
   command line, idempotent NAT rules for egress.
@@ -169,17 +181,19 @@ rename, with a per-key lock so a key is fetched once under concurrency.
 | **Health checks** | No periodic instance health monitoring |
 | **Authentication** | Optional bearer token on the management API (`AUTH_TOKEN`); the invocation route and worker proxy ports are unauthenticated |
 | **Job cancellation** | No way to cancel a running job |
-| **Workspace volumes** | No writable/persistent volume support for jobs yet |
 
 ## Known Gaps / Deferred
 
-- A `JobRecord` has no heartbeat or expiry, so a worker dying mid-job leaves the
-  record `running` until a reconciler exists.
+- A `JobRecord` carries a heartbeat that is refreshed while the job runs, but
+  nothing reconciles a record whose heartbeat has stopped: a worker dying mid-job
+  still leaves it `running` until something checks.
 - Offline jobs rely on the command baked into the rootfs `/init`; delivering it
   properly needs a config drive (deferred).
 - vsock is not implemented, although the kernel supports it. It is the eventual
   route to interactive sessions and trustworthy structured status.
-- The stream has no `XTRIM`/DLQ; a malformed payload redelivers indefinitely.
+- The provision stream is bounded by `XTRIM`, and entries past `JOB_MAX_DELIVERIES`
+  are moved to `stream:vm_provision:dlq`, so a poison payload no longer redelivers
+  forever. The DLQ is never trimmed and has no replay tooling.
 - Multi-tenancy (jailer, cgroups, CPU templates, admission control) and API auth
   are out of scope for now.
 - Orphaned VMs/TAPs/netns from a killed worker are avoided by collision-safe
@@ -190,7 +204,8 @@ rename, with a per-key lock so a key is fetched once under concurrency.
 Worker (see `worker/.env.sample`): `WORKER_ID`, `WORKER_IP`, `REDIS_ADDR`,
 `ETCD_ENDPOINTS`, `FIRECRACKER_BIN`, `KERNEL_PATH`, `RUNTIME_PATH`, `SOCKET_DIR`,
 `CODE_CACHE_DIR`, `RUNTIMES_CACHE_DIR`, `NET_MODE`, `BRIDGE_NAME`, `BRIDGE_CIDR`,
-`NETNS_SUPERNET`, `GUEST_DNS`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`,
+`NETNS_SUPERNET`, `GUEST_DNS`, `WORKSPACE_DIR`, `WORKSPACE_TTL`,
+`JOB_MAX_DELIVERIES`, `STREAM_MAX_LEN`, `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`,
 `MINIO_SECRET_KEY`, `MINIO_BUCKET`, `OTLP_ENDPOINT`.
 
 Gateway: `ETCD_ENDPOINTS`, `REDIS_ADDR`, `PORT`, `DB_PATH`, `MINIO_*`,
