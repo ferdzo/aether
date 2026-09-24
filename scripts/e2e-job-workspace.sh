@@ -104,7 +104,7 @@ log "building worker"
 
 : >"$LOG"
 log "starting worker (NET_MODE=none, WORKSPACE_DIR=$WS_DIR) -> $LOG"
-WORKER_ID="e2e-ws-worker-$$" WORKER_IP=127.0.0.1 \
+WORKER_CONTROL_PORT=19104 WORKER_ID="e2e-ws-worker-$$" WORKER_IP=127.0.0.1 \
 REDIS_ADDR="127.0.0.1:$REDIS_PORT" ETCD_ENDPOINTS="127.0.0.1:$ETCD_PORT" \
 FIRECRACKER_BIN="$ROOT/.assets/bin/firecracker" KERNEL_PATH="$ROOT/.assets/vmlinux" \
 RUNTIME_PATH="$ROOT/.assets/job-rootfs.ext4" \

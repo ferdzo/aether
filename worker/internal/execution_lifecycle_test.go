@@ -264,9 +264,26 @@ func TestStartExecutionRemovesStaleWorkspaceForTerminalRecord(t *testing.T) {
 	if err := os.WriteFile(wsPath, []byte("stale"), 0o644); err != nil {
 		t.Fatalf("seed stale workspace: %v", err)
 	}
-	withExecutionRecordSeams(t, nil, func(_ *Registry, id string) (protocol.ExecutionRecord, error) {
-		return protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateStopped, WorkspacePath: wsPath}, nil
-	})
+	// A stateful store, because the creating record this attempt writes must be
+	// visible to the reclaim check. A constant stub returns "stopped" forever
+	// and hides the ordering bug this test exists to catch: with the reclaim
+	// running after the creating write it would see "creating" and bail.
+	store := map[string]protocol.ExecutionRecord{
+		"exec-again": {ID: "exec-again", State: protocol.ExecutionStateStopped, WorkspacePath: wsPath},
+	}
+	withExecutionRecordSeams(t,
+		func(_ *Registry, rec protocol.ExecutionRecord) error {
+			store[rec.ID] = rec
+			return nil
+		},
+		func(_ *Registry, id string) (protocol.ExecutionRecord, error) {
+			rec, ok := store[id]
+			if !ok {
+				return protocol.ExecutionRecord{}, os.ErrNotExist
+			}
+			return rec, nil
+		},
+	)
 
 	// The creator asserts the stale image is gone when it is invoked.
 	created := false

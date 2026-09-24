@@ -325,6 +325,24 @@ t9=0
 { [ "$EXEC_CODE" = "409" ] || [ "$EXEC_CODE" = "404" ]; } || t9=1
 check "Test 9: DELETE stops the execution and later execs are rejected" "$t9"
 
+# --- Test 10: re-create the same id after destroy ---------------------------
+# Destroy retains the workspace image on purpose, so re-creating the same id
+# must reclaim it first. CreateWorkspace refuses to reuse an existing file, and
+# the reclaim check only trusts a terminal record, so this fails whenever the
+# reclaim is sequenced after the creating record is written.
+echo
+echo "--- Test 10: re-create the same id after destroy ---"
+RC_CODE=$(curl -sS -o "$WORK/recreate.json" -w '%{http_code}' -X POST "$BASE" \
+  -H 'Content-Type: application/json' \
+  -d "{\"id\":\"$EXEC_ID\",\"runtime\":\"exec\",\"workspace_mb\":64,\"timeout_seconds\":300}" 2>/dev/null || true)
+RC_BODY="$(cat "$WORK/recreate.json")"
+echo "re-create HTTP $RC_CODE: $RC_BODY"
+t10=0
+[ "$RC_CODE" = "201" ] || t10=1
+[ "$(jq -r '.state' <<<"$RC_BODY" 2>/dev/null)" = "ready" ] || t10=1
+check "Test 10: re-creating a destroyed id becomes ready" "$t10"
+curl -sS -o /dev/null -X DELETE "$BASE/$EXEC_ID" 2>/dev/null || true
+
 echo
 echo "================ SUMMARY ================================="
 echo "execution    : $EXEC_ID"
