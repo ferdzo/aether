@@ -293,6 +293,70 @@ func TestBuildMMDSDataResolvesDefaultPort(t *testing.T) {
 	}
 }
 
+// A persistent execution's MMDS payload carries the token, env and DNS the
+// exec-service guest bootstrap needs; exec-service mode is selected by argv, so
+// there is deliberately no mode/command/port in it.
+func TestBuildExecutionMMDSData(t *testing.T) {
+	data := buildExecutionMMDSData("tok-1", protocol.Job{
+		EnvVars: map[string]string{"FOO": "bar"},
+	}, []string{"1.1.1.1", "8.8.8.8"})
+
+	if got := data["token"]; got != "tok-1" {
+		t.Fatalf("token = %v, want tok-1", got)
+	}
+	env, ok := data["env"].(map[string]string)
+	if !ok || env["FOO"] != "bar" {
+		t.Fatalf("env = %v, want FOO=bar", data["env"])
+	}
+	dns, ok := data["dns"].([]string)
+	if !ok || len(dns) != 2 || dns[0] != "1.1.1.1" {
+		t.Fatalf("dns = %v, want [1.1.1.1 8.8.8.8]", data["dns"])
+	}
+	if _, present := data["mode"]; present {
+		t.Fatal("execution MMDS must not carry a mode field (exec-service is argv-selected)")
+	}
+
+	// No DNS configured must not emit the key at all, mirroring the other paths.
+	if _, present := buildExecutionMMDSData("tok-1", protocol.Job{}, nil)["dns"]; present {
+		t.Fatal("empty GuestDNS must not be added to the execution MMDS payload")
+	}
+}
+
+// Offline executions still get the read-only root (the shared image hazard is
+// independent of networking) but no boot token and no MMDS.
+func TestStartExecutionOfflineIsReadOnlyWithoutMMDS(t *testing.T) {
+	w := newJobWorker(t)
+	w.cfg.SocketDir = t.TempDir()
+	w.cfg.WorkspaceDir = t.TempDir()
+	w.cfg.NoNetwork = true
+
+	withWorkspaceCreator(t, func(dir, id string, size int) (string, error) {
+		return dir + "/" + id + ".ext4", nil
+	})
+	var gotCfg InstanceConfig
+	withProvisionSeams(t, func(_ context.Context, _ *Instance, cfg InstanceConfig) error {
+		gotCfg = cfg
+		return nil
+	}, nil, nil)
+	withExecutionReadySeam(t, func(context.Context, string, time.Duration) error { return nil })
+
+	if err := w.handleJob(context.Background(), executionJob("exec-offline-ro", 64)); err != nil {
+		t.Fatalf("handleJob = %v, want nil", err)
+	}
+	if !gotCfg.NoNetwork {
+		t.Fatal("offline execution must set NoNetwork")
+	}
+	if !gotCfg.RootFSReadOnly {
+		t.Fatal("offline execution must still mount the shared runtime read-only")
+	}
+	if gotCfg.BootToken != "" {
+		t.Fatalf("offline execution must not set a boot token, got %q", gotCfg.BootToken)
+	}
+	if gotCfg.MMDSData != nil {
+		t.Fatalf("offline execution must not set MMDS, got %v", gotCfg.MMDSData)
+	}
+}
+
 func TestInstanceStopDrainsInFlightAndRemovesSocket(t *testing.T) {
 	tmp := t.TempDir()
 	sockPath := filepath.Join(tmp, "inst-1.sock")

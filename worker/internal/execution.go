@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"aether/shared/id"
 	"aether/shared/logger"
 	"aether/shared/protocol"
 	"aether/shared/vm"
@@ -516,6 +517,18 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 	// blocking sink would stall VM shutdown (see jobLog).
 	console := newJobLog(defaultJobLogBytes, "")
 
+	// Boot token / MMDS: only for a networked worker. The guest has a NIC and
+	// reaches MMDS at 169.254.169.254; aether-env (exec-service mode) fetches
+	// the payload and writes /etc/resolv.conf from "dns" before serving execs.
+	// Offline executions emit neither, exactly like offline process jobs, so
+	// the guest aether-env proceeds with no token (its existing path).
+	var bootToken string
+	var mmdsData map[string]interface{}
+	if !w.cfg.NoNetwork {
+		bootToken = id.GenerateToken()
+		mmdsData = buildExecutionMMDSData(bootToken, job, w.cfg.GuestDNS)
+	}
+
 	cfg := InstanceConfig{
 		KernelPath:    w.cfg.KernelPath,
 		RuntimePath:   rootfs,
@@ -523,9 +536,16 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		VCPUCount:     vcpu,
 		MemSizeMB:     memMB,
 		ConsoleWriter: console,
+		// Executions share one cached runtime image per runtime across every VM.
+		// Mounting it read-only removes the cross-VM corruption hazard: the
+		// per-execution workspace drive remains the only writable disk. All
+		// executions are read-only, regardless of NET_MODE.
+		RootFSReadOnly: true,
 		// Executions are vsock-only; the guest has no NIC requirement. NoNetwork
 		// is honoured so an offline worker can serve them without privileges.
 		NoNetwork: w.cfg.NoNetwork,
+		BootToken: bootToken,
+		MMDSData:  mmdsData,
 		Vsock:     &vm.VsockSpec{Path: vsockPath, CID: cid},
 	}
 	if workspacePath != "" {

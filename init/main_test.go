@@ -472,3 +472,100 @@ func TestWriteResolvConfWritesAndCreatesEtc(t *testing.T) {
 		t.Fatalf("resolv.conf = %q, want %q", got, want)
 	}
 }
+
+// bootstrapExecService is the exec-service MMDS gate. The cases below pin the
+// two contracts that matter: no token is a no-op (offline executions keep
+// working with no NIC), and a token that cannot be resolved fails closed.
+func TestBootstrapExecService(t *testing.T) {
+	t.Run("no token is a no-op", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "resolv.conf")
+		fetchCalled := false
+		err := bootstrapExecService("", func(string) (*MMDSData, error) {
+			fetchCalled = true
+			return nil, errors.New("must not be called")
+		}, func(string, string) { t.Fatal("setenv must not be called") }, path)
+		if err != nil {
+			t.Fatalf("bootstrapExecService(no token) = %v, want nil", err)
+		}
+		if fetchCalled {
+			t.Fatal("fetch must not be called when no boot token is present")
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("resolv.conf must not be written without a token, stat err = %v", statErr)
+		}
+	})
+
+	t.Run("fetch error fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		err := bootstrapExecService("tok-1", func(string) (*MMDSData, error) {
+			return nil, errors.New("connection refused")
+		}, func(string, string) {}, filepath.Join(dir, "resolv.conf"))
+		if err == nil {
+			t.Fatal("a boot token with an unreachable MMDS must return an error")
+		}
+		if !strings.Contains(err.Error(), "could not be loaded") {
+			t.Fatalf("error = %v, want it to explain the metadata could not be loaded", err)
+		}
+	})
+
+	t.Run("nil metadata fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		err := bootstrapExecService("tok-1", func(string) (*MMDSData, error) {
+			return nil, nil
+		}, func(string, string) {}, filepath.Join(dir, "resolv.conf"))
+		if err == nil {
+			t.Fatal("nil metadata with a boot token must return an error")
+		}
+	})
+
+	t.Run("token mismatch fails closed", func(t *testing.T) {
+		dir := t.TempDir()
+		err := bootstrapExecService("tok-1", func(string) (*MMDSData, error) {
+			return &MMDSData{Token: "other"}, nil
+		}, func(string, string) {}, filepath.Join(dir, "resolv.conf"))
+		if err == nil {
+			t.Fatal("a mismatched token must return an error")
+		}
+	})
+
+	t.Run("applies env and dns", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "resolv.conf")
+		env := map[string]string{}
+		md := &MMDSData{
+			Token: "tok-1",
+			Env:   map[string]string{"FOO": "bar", "BAZ": "qux"},
+			DNS:   []string{"1.1.1.1", "8.8.8.8"},
+		}
+		if err := bootstrapExecService("tok-1", func(string) (*MMDSData, error) {
+			return md, nil
+		}, func(k, v string) { env[k] = v }, path); err != nil {
+			t.Fatalf("bootstrapExecService = %v, want nil", err)
+		}
+		if env["FOO"] != "bar" || env["BAZ"] != "qux" {
+			t.Fatalf("env = %v, want FOO=bar BAZ=qux", env)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read resolv.conf: %v", err)
+		}
+		want := "nameserver 1.1.1.1\nnameserver 8.8.8.8\n"
+		if string(got) != want {
+			t.Fatalf("resolv.conf = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("empty dns leaves resolv.conf untouched", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "resolv.conf")
+		if err := bootstrapExecService("tok-1", func(string) (*MMDSData, error) {
+			return &MMDSData{Token: "tok-1"}, nil
+		}, func(string, string) {}, path); err != nil {
+			t.Fatalf("bootstrapExecService = %v, want nil", err)
+		}
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("resolv.conf must not be written with an empty dns list, stat err = %v", statErr)
+		}
+	})
+}

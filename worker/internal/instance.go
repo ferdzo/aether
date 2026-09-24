@@ -81,6 +81,14 @@ type InstanceConfig struct {
 	FunctionPort int
 	BootToken    string
 	MMDSData     map[string]interface{}
+	// RootFSReadOnly marks the root filesystem drive read-only. Firecracker
+	// translates the drive's is_read_only flag into the authoritative
+	// "root=/dev/vda ro" kernel argument (it appends it after the caller's
+	// KernelArgs; see shared/vm/vm.go). Persistent executions set this so many
+	// VMs share one cached runtime image without any of them being able to
+	// write to it. Function instances and process jobs leave it false and are
+	// unchanged.
+	RootFSReadOnly bool
 	// NoNetwork launches the VM with no NIC at all: no netns setup, no IP
 	// allocation, no TAP creation/attachment. The guest then has no MMDS, so
 	// callers must not set BootToken/MMDSData for a network-less instance.
@@ -283,22 +291,23 @@ func (i *Instance) provisionNetwork(cfg InstanceConfig) (instanceNetwork, error)
 // them all empty, which is the no-NIC configuration vm.Manager expects.
 func buildVMConfig(cfg InstanceConfig, np instanceNetwork, stdout, stderr io.Writer) vm.Config {
 	return vm.Config{
-		KernelPath:    cfg.KernelPath,
-		RootFSPath:    cfg.RuntimePath,
-		Drives:        cfg.Drives,
-		SocketPath:    cfg.SocketPath,
-		VCPUCount:     cfg.VCPUCount,
-		MemSizeMB:     cfg.MemSizeMB,
-		TAPDeviceName: np.tapName,
-		VMIP:          np.vmIP,
-		GatewayIP:     np.gateway,
-		GuestMask:     np.guestMask,
-		NetNSPath:     np.netNSPath,
-		BootToken:     cfg.BootToken,
-		MMDSData:      cfg.MMDSData,
-		Stdout:        stdout,
-		Stderr:        stderr,
-		Vsock:         cfg.Vsock,
+		KernelPath:     cfg.KernelPath,
+		RootFSPath:     cfg.RuntimePath,
+		RootFSReadOnly: cfg.RootFSReadOnly,
+		Drives:         cfg.Drives,
+		SocketPath:     cfg.SocketPath,
+		VCPUCount:      cfg.VCPUCount,
+		MemSizeMB:      cfg.MemSizeMB,
+		TAPDeviceName:  np.tapName,
+		VMIP:           np.vmIP,
+		GatewayIP:      np.gateway,
+		GuestMask:      np.guestMask,
+		NetNSPath:      np.netNSPath,
+		BootToken:      cfg.BootToken,
+		MMDSData:       cfg.MMDSData,
+		Stdout:         stdout,
+		Stderr:         stderr,
+		Vsock:          cfg.Vsock,
 	}
 }
 

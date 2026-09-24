@@ -66,9 +66,26 @@ echo ">> exporting $BASE userland"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-CID="$(docker create "$BASE" true)"
-docker export "$CID" | tar -C "$STAGE" -xf -
-docker rm "$CID" >/dev/null
+if [ "$INIT_MODE" = "exec-service" ]; then
+  # The dev-workflow exec-service image must be able to run `git clone`, so it
+  # needs git + CA certificates + curl on top of the plain userland. This is a
+  # tiny docker build (unprivileged: the daemon does the install) whose result is
+  # exported exactly like the plain image; the baked and mmds modes are untouched.
+  echo ">> building exec-service userland with git, ca-certificates and curl"
+  TMP_CTX="$(mktemp -d)"
+  printf 'FROM %s\nRUN apk add --no-cache git ca-certificates curl\n' "$BASE" > "$TMP_CTX/Dockerfile"
+  IMG_TAG="aether-job-exec-base:$$"
+  docker build -q -t "$IMG_TAG" "$TMP_CTX" >/dev/null
+  CID="$(docker create "$IMG_TAG" true)"
+  docker export "$CID" | tar -C "$STAGE" -xf -
+  docker rm "$CID" >/dev/null
+  docker rmi "$IMG_TAG" >/dev/null 2>&1 || true
+  rm -rf "$TMP_CTX"
+else
+  CID="$(docker create "$BASE" true)"
+  docker export "$CID" | tar -C "$STAGE" -xf -
+  docker rm "$CID" >/dev/null
+fi
 
 echo ">> installing aether-env"
 install -m 0755 "$ASSETS/aether-env" "$STAGE/usr/bin/aether-env"
@@ -98,11 +115,20 @@ elif [ "$INIT_MODE" = "exec-service" ]; then
   # Long-lived vsock exec service. No command is baked in: the host connects to
   # the vsock Unix socket and sends exec requests over the control protocol.
   # Mounts and the optional /dev/vdb workspace are identical to the other modes.
+  #
+  # The root filesystem is mounted READ-ONLY for executions (one cached runtime
+  # image is shared by every VM), so the writable scratch paths are put on
+  # tmpfs: /tmp and /run. /etc/resolv.conf is a symlink to /tmp/resolv.conf
+  # (created when the image is assembled, below), so aether-env can still write
+  # DNS into the guest when MMDS bootstrap is used even though / is read-only.
   cat > "$STAGE/init" << 'EOF'
 #!/bin/sh
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+chmod 1777 /tmp
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 if [ -b /dev/vdb ]; then
   mkdir -p /workspace
@@ -134,6 +160,17 @@ exec /usr/bin/aether-env --process sh -c '$ESC_COMMAND'
 EOF
 fi
 chmod 0755 "$STAGE/init"
+
+if [ "$INIT_MODE" = "exec-service" ]; then
+  # The root is read-only for executions, so /etc/resolv.conf must resolve onto
+  # the tmpfs that /init mounts at /tmp. A symlink (not a copy) is what lets
+  # aether-env's writeResolvConf succeed without a writable root.
+  rm -f "$STAGE/etc/resolv.conf"
+  ln -s /tmp/resolv.conf "$STAGE/etc/resolv.conf"
+  # The workspace drive is mounted at /workspace by /init. The mountpoint must
+  # already exist in the image: mkdir cannot create it on a read-only root.
+  mkdir -p "$STAGE/workspace"
+fi
 
 echo ">> assembling $OUT"
 rm -f "$OUT"

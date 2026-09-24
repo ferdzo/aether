@@ -63,13 +63,16 @@ func TestExecServiceSmoke(t *testing.T) {
 	cfg := vm.Config{
 		KernelPath: kernel,
 		RootFSPath: rootfs,
-		Drives:     []vm.DriveSpec{{Path: wsImage}},
-		SocketPath: filepath.Join(workDir, "fc.sock"),
-		Vsock:      &vm.VsockSpec{Path: vsockPath, CID: 3},
-		VCPUCount:  1,
-		MemSizeMB:  256,
-		Stdout:     console,
-		Stderr:     console,
+		// Executions mount the shared cached runtime read-only. The smoke test
+		// uses the same flag so the in-guest checks below are meaningful.
+		RootFSReadOnly: true,
+		Drives:         []vm.DriveSpec{{Path: wsImage}},
+		SocketPath:     filepath.Join(workDir, "fc.sock"),
+		Vsock:          &vm.VsockSpec{Path: vsockPath, CID: 3},
+		VCPUCount:      1,
+		MemSizeMB:      256,
+		Stdout:         console,
+		Stderr:         console,
 	}
 
 	machine, err := vm.NewManager(fcBin).Launch(cfg)
@@ -85,6 +88,36 @@ func TestExecServiceSmoke(t *testing.T) {
 	c := waitExecClient(t, vsockPath, console)
 	t.Cleanup(func() { _ = c.conn.Close() })
 	t.Logf("exec service reachable over vsock at %s", vsockPath)
+
+	// Read-only rootfs verification (persistent executions share one cached
+	// runtime image, so it must be mounted ro). Firecracker appends
+	// "root=/dev/vda ro" from the drive's is_read_only flag; assert both the
+	// cmdline and the actual mount, then that the scratch paths stay writable.
+	cmdline := c.exec(t, "ro-cmdline", protocol.ExecRequest{Argv: []string{"cat", "/proc/cmdline"}})
+	t.Logf("guest cmdline: %q", strings.TrimSpace(cmdline.Stdout))
+	if cmdline.ExitCode != 0 || !strings.Contains(cmdline.Stdout, "root=/dev/vda ro") {
+		t.Errorf("guest cmdline = %q, want it to contain %q", cmdline.Stdout, "root=/dev/vda ro")
+	}
+
+	mounts := c.exec(t, "ro-mount", protocol.ExecRequest{Argv: []string{"sh", "-c", `awk '$2=="/"{print $4}' /proc/mounts`}})
+	t.Logf("root mount options: %q", strings.TrimSpace(mounts.Stdout))
+	if mounts.ExitCode != 0 || !hasMountOption(mounts.Stdout, "ro") {
+		t.Errorf("root mount options = %q, want them to include ro", mounts.Stdout)
+	}
+
+	tmp := c.exec(t, "ro-tmp", protocol.ExecRequest{Argv: []string{"sh", "-c", "echo tmpok > /tmp/probe && cat /tmp/probe"}})
+	t.Logf("tmp write: %+v", tmp)
+	if tmp.ExitCode != 0 || !strings.Contains(tmp.Stdout, "tmpok") {
+		t.Errorf("/tmp must be writable over a read-only root: %+v", tmp)
+	}
+
+	// DNS depends on this write; a read-only root is only viable if it succeeds
+	// (the exec-service image symlinks /etc/resolv.conf onto the tmpfs /tmp).
+	resolv := c.exec(t, "ro-resolv", protocol.ExecRequest{Argv: []string{"sh", "-c", "echo nameserver 1.1.1.1 > /etc/resolv.conf && cat /etc/resolv.conf"}})
+	t.Logf("resolv.conf write: %+v", resolv)
+	if resolv.ExitCode != 0 || !strings.Contains(resolv.Stdout, "nameserver 1.1.1.1") {
+		t.Errorf("/etc/resolv.conf must be writable over a read-only root: %+v", resolv)
+	}
 
 	// Test 1: echo hello -> exit 0, stdout contains hello, stderr empty.
 	res := c.exec(t, "t1", protocol.ExecRequest{Argv: []string{"echo", "hello"}})
@@ -347,6 +380,17 @@ func (c *execClient) exec(t *testing.T, id string, req protocol.ExecRequest) pro
 		t.Fatalf("collect exec %s: %v", id, err)
 	}
 	return res
+}
+
+// hasMountOption reports whether a comma-separated /proc/mounts options field
+// contains want as a whole option.
+func hasMountOption(opts, want string) bool {
+	for _, o := range strings.Split(strings.TrimSpace(opts), ",") {
+		if o == want {
+			return true
+		}
+	}
+	return false
 }
 
 // createExt4 makes a fresh ext4 image at path with the given mke2fs size
