@@ -1,189 +1,129 @@
 # Aether
 
-Firecracker microVM runtime for serverless functions and isolated process jobs.
+Firecracker microVM runtime. Three workload shapes:
 
-Aether runs two kinds of workload, each in its own microVM:
+- **Functions** — an HTTP server per microVM, cold-started on demand, reverse-proxied, autoscaled, scaled to zero.
+- **Jobs** — one command per microVM; the exit code is recorded and the VM is destroyed.
+- **Executions** — one long-lived microVM you run many commands in, sharing a writable `/workspace`.
 
-- **Functions** are HTTP servers. They are cold-started on demand, reached
-  through a per-instance reverse proxy, autoscaled, and scaled to zero.
-- **Jobs** are commands. The VM boots, the command runs, its stdout and exit
-  status are captured, and the VM is destroyed. This is the shape a coding or
-  SRE agent needs.
+Aether exposes its own API; orchestration lives outside it.
 
-Design direction: [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md).
-Implementation state: [`documentation/CONTEXT.md`](documentation/CONTEXT.md).
+## Requirements
 
-## Status
-
-Proof of concept, single operator. The management API accepts an optional
-bearer token (`AUTH_TOKEN`); the invocation route and the per-instance proxy
-ports are unauthenticated. There is no multi-tenancy, jailer or cgroup
-isolation.
-
-### Verified
-
-Every entry is backed by a test that boots a real microVM. Harness names are in
-the last column; see [Verifying](#verifying-it-works).
-
-| Capability | Evidence | Root |
-|---|---|---|
-| Process job | A stream entry drove the worker to boot a VM running `sh -c 'echo hello; sleep 2; exit 42'`; stdout was captured, `exit_code=42` was recorded, and the stream entry was acked at spawn. `scripts/e2e-job.sh` | no |
-| Job with a NIC | A bridge-mode job completed with `exit_code=42` from a rootfs containing neither the command nor the exit nonce, which requires MMDS to have supplied both. `scripts/e2e-job-bridge.sh` | yes |
-| Guest networking | From inside the guest: `github.com` resolved and an outbound HTTPS request returned 200. `scripts/test-guest-egress.sh` | yes |
-| netns addressing | The guest gateway sits on the in-namespace bridge, the TAP is attached to it, the host has a route for the guest /30, and forwarding is enabled in the namespace. `scripts/test-guest-egress.sh` | yes |
-| Firecracker and kernel | Real boots on Firecracker v1.17.0 with guest kernel 6.18.48. | — |
-| Ordered drives | A VM attached the root device plus an extra read-only drive in order. | no |
-| Job workspace | A job wrote `/workspace/proof.txt`; after the VM was destroyed the host recovered the contents from the workspace image. `scripts/e2e-job-workspace.sh` | no |
-
-### Unverified
-
-- The HTTP function path end to end since the reliability work: create, cold
-  start, MMDS, readiness, proxy, scale-down.
-- Job cancellation.
-
-## How it works
-
-```
-                       gateway :8080
-   function CRUD · /functions/{id}/* routing · cold-start singleflight · SQLite
-                              │
-        ┌─────────────────────┼──────────────────────┐
-        ▼                     ▼                      ▼
-      etcd                 Redis                 S3 storage
-  /workers/            stream:vm_provision      function-code/
-  /functions/{id}/     group: aether-workers    runtimes/
-    instances/         channel:code_update
-  /jobs/{id}
-                              │
-                              ▼
-                            worker
-   functions: code → runtime → boot → HTTP readiness → reverse proxy
-              → register → autoscale
-   jobs:      Mode "process" → boot, no proxy and no readiness check
-              → record → ack at spawn → record the outcome asynchronously
-                              │
-                              ▼
-                     Firecracker microVMs
-                              │
-                              ▼
-   guest: init/ → aether-env
-     fetches MMDS with bounded retries; exits non-zero if a boot token is
-     present but metadata cannot be loaded
-     writes /etc/resolv.conf from the MMDS dns list
-     functions: execs the entrypoint
-     jobs:      supervises the command, enforces the timeout (exit 124),
-                prints AETHER_EXIT:<nonce>:<code> as its final line, resets
-```
-
-The workload is PID 1 in the guest, so a normal exit would panic the kernel and
-Firecracker's own exit code is unrelated to the workload's. Process mode
-therefore reports the exit status on the console and then performs a guest
-reset; `poweroff` does not terminate Firecracker on x86.
+- Linux with KVM (`/dev/kvm`)
+- Docker (infrastructure and rootfs builds)
+- Go 1.24
+- Root for bridge/TAP/netns networking. `NET_MODE=none` needs no privileges.
 
 ## Quick start
 
 ```bash
-# Assets: Firecracker, kernel, aether-env, node rootfs, worker/.env
-scripts/setup.sh
-
-# Infrastructure: etcd, redis, object storage, observability
-cd deployment && docker compose up -d
-
-# Gateway
-cd gateway && go build && ./gateway
-
-# Worker. sudo for bridge/TAP; NET_MODE=none for network-less jobs.
-cd worker && go build && sudo ./worker
-
-curl -X POST http://localhost:8080/api/functions \
-  -H "Content-Type: application/json" \
-  -d '{"name":"hello","runtime":"node"}'
-zip code.zip handler.js
-curl -X POST http://localhost:8080/api/functions/{id}/code -F "file=@code.zip"
-curl http://localhost:8080/functions/{id}/
+scripts/setup.sh                        # firecracker, kernel, aether-env, node rootfs, worker/.env
+cd deployment && docker compose up -d   # etcd, object storage, redis, observability
+cd gateway && go build && ./gateway     # :8080
+cd worker  && go build && sudo ./worker # root for bridge/TAP; NET_MODE=none to run unprivileged
 ```
 
-## Verifying it works
+## Executions
+
+Create a VM, run commands in it, destroy it.
 
 ```bash
-# Process job, no root. Starts its own redis and uses the compose etcd/fs.
-# Asserts the job record is state=done with exit_code=42 and that the stream
-# entry is acked.
-scripts/e2e-job.sh
+B=http://localhost:8080/api/executions
 
-# The same job submitted over HTTP, through the gateway API.
-scripts/e2e-job-api.sh
+# required: runtime, timeout_seconds (lifetime), workspace_mb
+curl -s -X POST $B -H 'Content-Type: application/json' \
+  -d '{"id":"ex1","runtime":"exec","timeout_seconds":900,"workspace_mb":64}'
 
-# A job with a writable workspace; the file it writes is recovered from the
-# workspace image after the VM is gone.
-scripts/e2e-job-workspace.sh
+# argv only; no implicit shell
+curl -s -X POST $B/ex1/exec -d '{"argv":["echo","hello"]}'
+curl -s -X POST $B/ex1/exec -d '{"argv":["sh","-c","echo abc > /workspace/file"]}'
+curl -s -X POST $B/ex1/exec -d '{"argv":["cat","/workspace/file"]}'   # -> abc
 
-# Guest networking and MMDS delivery, root required (bridge, TAP, NAT).
-sudo scripts/test-guest-egress.sh
-sudo scripts/e2e-job-bridge.sh
+# stream output live instead of waiting for the result
+curl -sN -X POST $B/ex1/exec \
+  -d '{"argv":["sh","-c","echo one; sleep 2; echo two"],"stream":true}'
+
+curl -s  $B/ex1/exec/<exec_id>          # record: state, pid, exit code, timings
+curl -sN $B/ex1/exec/<exec_id>/events   # replay/attach to the event stream
+curl -s -X POST $B/ex1/exec/<exec_id>/signal -d '{"signal":"SIGTERM"}'
+curl -s -X DELETE $B/ex1
 ```
-
-Supporting scripts:
-
-```bash
-scripts/build-job-rootfs.sh [command]     # job rootfs; AETHER_JOB_INIT=mmds for no baked command
-scripts/build-runtime.sh <image> <name>   # publish a runtime rootfs to storage
-```
-
-## API
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/functions` | Create function |
-| `GET /api/functions` | List functions |
-| `GET /api/functions/{id}` | Get function |
-| `PUT /api/functions/{id}` | Update function |
-| `DELETE /api/functions/{id}` | Delete function |
+| `POST /api/executions` | Create: `runtime`, `timeout_seconds`, `workspace_mb`; optional `id`, `vcpu`, `memory_mb`, `env_vars` |
+| `GET /api/executions/{id}` | State, worker address, workspace path |
+| `POST /api/executions/{id}/exec` | Run: `argv` required; optional `cwd`, `env`, `timeout_seconds`, `stream` |
+| `GET /api/executions/{id}/exec/{exec_id}` | One exec's record |
+| `GET /api/executions/{id}/exec/{exec_id}/events` | SSE `started`/`stdout`/`stderr`/`exited`, with `Last-Event-ID` resume |
+| `POST /api/executions/{id}/exec/{exec_id}/signal` | `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGKILL` to that exec's process group |
+| `DELETE /api/executions/{id}` | Stop the VM and release its resources |
+
+One exec runs at a time per execution; a concurrent one gets `409`. A non-zero exit is an exec result, not an execution failure. `/workspace` is a per-execution writable disk that survives across execs; the VM root filesystem is read-only.
+
+The `runtime` must already exist in storage as `runtimes/<name>/rootfs.ext4`
+(`scripts/build-runtime.sh`, or `AETHER_JOB_INIT=exec-service scripts/build-job-rootfs.sh` for an execution image).
+
+## Jobs
+
+One command, one VM, then destroyed.
+
+```bash
+curl -s -X POST http://localhost:8080/api/jobs -H 'Content-Type: application/json' \
+  -d '{"runtime":"exec","command":["sh","-c","go test ./..."],"timeout_seconds":600,"workspace_mb":256}'
+
+curl -s http://localhost:8080/api/jobs/<job_id>              # state, exit_code, workspace_path
+curl -s -X DELETE http://localhost:8080/api/jobs/<job_id>    # cancel a running job
+```
+
+## Functions
+
+| Endpoint | Description |
+|---|---|
+| `POST`, `GET /api/functions` | Create, list |
+| `GET`, `PUT`, `DELETE /api/functions/{id}` | Read, update, delete |
 | `POST /api/functions/{id}/code` | Upload code (zip/tar.gz, built into an ext4) |
-| `GET /api/functions/{id}/invocations` | Invocation history |
-| `GET /api/functions/{id}/logs` | Function logs (Loki) |
-| `ANY /functions/{id}/*` | Invoke function |
-| `POST /api/jobs` | Submit a job: `runtime`, `command`, `timeout_seconds`, `vcpu`, `memory_mb`, `workspace_mb`, `env_vars` |
-| `GET /api/jobs/{id}` | Job state and exit code |
+| `GET /api/functions/{id}/invocations`, `/logs` | Invocation history, logs |
+| `ANY /functions/{id}/*` | Invoke |
 
 ## Configuration
 
-Worker (`worker/.env.sample` covers the required subset; `NET_MODE`, `GUEST_DNS`,
-`RUNTIMES_CACHE_DIR` and `CODE_CACHE_DIR` are read by the code but are not in the
-sample):
+Worker (`worker/.env.sample` covers the required subset):
 
 | Variable | Meaning |
 |---|---|
 | `WORKER_ID`, `WORKER_IP` | Identity; `WORKER_IP` must be reachable by the gateway |
 | `REDIS_ADDR`, `ETCD_ENDPOINTS` | Infrastructure |
 | `FIRECRACKER_BIN`, `KERNEL_PATH`, `RUNTIME_PATH` | Boot assets |
-| `SOCKET_DIR` | Firecracker API sockets, created if missing |
+| `SOCKET_DIR` | Firecracker API sockets and vsock paths |
 | `NET_MODE` | `bridge` (default), `netns`, or `none` for network-less VMs |
-| `BRIDGE_NAME`, `BRIDGE_CIDR`, `NETNS_SUPERNET` | Networking |
-| `GUEST_DNS` | Resolvers written into the guest, default `1.1.1.1,8.8.8.8` |
-| `WORKSPACE_DIR`, `WORKSPACE_TTL` | Job workspace images and retention (default 24h; 0 disables GC) |
-| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | S3-compatible storage |
+| `BRIDGE_NAME`, `BRIDGE_CIDR`, `NETNS_SUPERNET`, `GUEST_DNS` | Networking, guest resolvers |
+| `WORKSPACE_DIR`, `WORKSPACE_TTL` | Workspace images and retention |
+| `WORKER_CONTROL_PORT`, `WORKER_CONTROL_TOKEN` | Worker control API the gateway proxies to |
+| `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` | S3-compatible storage |
 | `OTLP_ENDPOINT` | Telemetry; empty disables it |
 
-Gateway: `ETCD_ENDPOINTS`, `REDIS_ADDR`, `PORT`, `DB_PATH`, `MINIO_*`,
-`LOKI_URL`, `AUTH_TOKEN`.
+Gateway: `ETCD_ENDPOINTS`, `REDIS_ADDR`, `PORT`, `DB_PATH`, `MINIO_*`, `LOKI_URL`, `AUTH_TOKEN`.
 
-## Requirements
+## Verifying
 
-- Linux with KVM (`/dev/kvm`)
-- A Firecracker binary and a bootable guest kernel
-- A runtime rootfs containing `/init` and `/usr/bin/aether-env`
-- Root for bridge/TAP/netns networking. Booting and `NET_MODE=none` do not need it.
+```bash
+scripts/e2e-exec.sh              # guest exec service, real VM
+scripts/e2e-execution.sh         # executions API end to end
+scripts/e2e-execution-stream.sh  # live events, records, signals
+scripts/e2e-job.sh               # one-shot job
+scripts/e2e-job-api.sh           # job over HTTP
+scripts/e2e-job-cancel.sh        # job cancellation
+sudo scripts/e2e-execution-network.sh  # DNS, HTTPS, git clone inside an execution
+sudo scripts/test-guest-egress.sh      # guest networking, function path
+```
 
 ## Documentation
 
-| File | Contents |
-|---|---|
-| [`documentation/ARCHITECTURE.md`](documentation/ARCHITECTURE.md) | Design direction and migration plan |
-| [`documentation/CONTEXT.md`](documentation/CONTEXT.md) | Current implementation state |
-| [`documentation/DESIGN.md`](documentation/DESIGN.md) | Superseded |
-| [`documentation/DEVELOPER_NOTES.md`](documentation/DEVELOPER_NOTES.md) | Historical build notes |
+- `documentation/ARCHITECTURE.md` — design direction and migration plan
+- `documentation/CONTEXT.md` — current implementation state
 
 ## License
 
-MIT License.
+MIT
