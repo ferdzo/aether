@@ -33,6 +33,7 @@ the last column; see [Verifying](#verifying-it-works).
 | netns addressing | The guest gateway sits on the in-namespace bridge, the TAP is attached to it, the host has a route for the guest /30, and forwarding is enabled in the namespace. `scripts/test-guest-egress.sh` | yes |
 | Firecracker and kernel | Real boots on Firecracker v1.17.0 with guest kernel 6.18.48. | — |
 | Ordered drives | A VM attached the root device plus an extra read-only drive in order. | no |
+| Job workspace | A job wrote `/workspace/proof.txt`; after the VM was destroyed the host recovered the contents from the workspace image. `scripts/e2e-job-workspace.sh` | no |
 
 ### Unverified
 
@@ -113,6 +114,10 @@ scripts/e2e-job.sh
 # The same job submitted over HTTP, through the gateway API.
 scripts/e2e-job-api.sh
 
+# A job with a writable workspace; the file it writes is recovered from the
+# workspace image after the VM is gone.
+scripts/e2e-job-workspace.sh
+
 # Guest networking and MMDS delivery, root required (bridge, TAP, NAT).
 sudo scripts/test-guest-egress.sh
 sudo scripts/e2e-job-bridge.sh
@@ -138,7 +143,7 @@ scripts/build-runtime.sh <image> <name>   # publish a runtime rootfs to storage
 | `GET /api/functions/{id}/invocations` | Invocation history |
 | `GET /api/functions/{id}/logs` | Function logs (Loki) |
 | `ANY /functions/{id}/*` | Invoke function |
-| `POST /api/jobs` | Submit a job: `runtime`, `command`, `timeout_seconds`, `vcpu`, `memory_mb`, `env_vars` |
+| `POST /api/jobs` | Submit a job: `runtime`, `command`, `timeout_seconds`, `vcpu`, `memory_mb`, `workspace_mb`, `env_vars` |
 | `GET /api/jobs/{id}` | Job state and exit code |
 
 ## Configuration
@@ -156,6 +161,7 @@ sample):
 | `NET_MODE` | `bridge` (default), `netns`, or `none` for network-less VMs |
 | `BRIDGE_NAME`, `BRIDGE_CIDR`, `NETNS_SUPERNET` | Networking |
 | `GUEST_DNS` | Resolvers written into the guest, default `1.1.1.1,8.8.8.8` |
+| `WORKSPACE_DIR`, `WORKSPACE_TTL` | Job workspace images and retention (default 24h; 0 disables GC) |
 | `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_BUCKET` | S3-compatible storage |
 | `OTLP_ENDPOINT` | Telemetry; empty disables it |
 
