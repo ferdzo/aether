@@ -64,6 +64,17 @@ func main() {
 	// or reboots the guest when a command finishes; see exec_service.go.
 	if isExecServiceFlag(os.Args[1:]) {
 		fmt.Fprintln(os.Stderr, "aether-env: starting exec service")
+		if err := bootstrapExecService(
+			parseBootToken(),
+			func(token string) (*MMDSData, error) {
+				return fetchMetadataWithRetry(token, metadataFetchAttempts, metadataFetchBackoff)
+			},
+			func(key, value string) { _ = os.Setenv(key, value) },
+			"/etc/resolv.conf",
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: refusing to start exec service: %v\n", err)
+			os.Exit(1)
+		}
 		if err := runExecService(); err != nil {
 			fmt.Fprintf(os.Stderr, "aether-env: exec service failed: %v\n", err)
 			os.Exit(1)
@@ -399,6 +410,41 @@ func parseBootToken() string {
 		}
 	}
 	return ""
+}
+
+// bootstrapExecService applies optional MMDS bootstrap to exec-service mode.
+//
+// The exec service is deliberately usable with no NIC and no metadata: when the
+// kernel command line carries no boot token it is a no-op and the service starts
+// exactly as before. When a token IS present the worker stamped it because it
+// gave the guest a NIC, so the token must resolve. The payload's environment and
+// DNS list are applied before the service starts (DNS is what makes outbound
+// name resolution work, via /etc/resolv.conf). A missing/unfetchable/mismatched
+// payload is a hard error so the caller exits non-zero rather than starting a
+// service that silently has no DNS.
+func bootstrapExecService(bootToken string, fetch func(string) (*MMDSData, error), setenv func(string, string), resolvPath string) error {
+	if bootToken == "" {
+		return nil
+	}
+	metadata, err := fetch(bootToken)
+	if err != nil {
+		return fmt.Errorf("bootstrap metadata was expected (boot token present) but could not be loaded: %w", err)
+	}
+	if metadata == nil {
+		return errors.New("bootstrap metadata was expected (boot token present) but none was returned")
+	}
+	if metadata.Token != bootToken {
+		return fmt.Errorf("bootstrap token mismatch (expected %q, got %q)", bootToken, metadata.Token)
+	}
+	for key, value := range metadata.Env {
+		setenv(key, value)
+	}
+	if len(metadata.DNS) > 0 {
+		if err := writeResolvConf(resolvPath, metadata.DNS); err != nil {
+			return fmt.Errorf("failed to write %s: %w", resolvPath, err)
+		}
+	}
+	return nil
 }
 
 // fetchMetadataWithRetry calls fetchMetadata up to attempts times, sleeping

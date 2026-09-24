@@ -161,6 +161,70 @@ func TestStartExecutionReadyAndUntracked(t *testing.T) {
 	}
 }
 
+// A networked (non-offline) execution must deliver a boot token and an MMDS
+// payload with the DNS list so the exec-service guest can write /etc/resolv.conf,
+// and it must always mount the shared runtime read-only.
+func TestStartExecutionOnlineDeliversMMDSAndReadOnlyRoot(t *testing.T) {
+	w := newJobWorker(t)
+	w.cfg.SocketDir = t.TempDir()
+	w.cfg.WorkspaceDir = t.TempDir()
+	w.cfg.GuestDNS = []string{"1.1.1.1", "8.8.8.8"}
+
+	withWorkspaceCreator(t, func(dir, id string, size int) (string, error) {
+		return dir + "/" + id + ".ext4", nil
+	})
+
+	var gotCfg InstanceConfig
+	withProvisionSeams(t, func(_ context.Context, _ *Instance, cfg InstanceConfig) error {
+		gotCfg = cfg
+		return nil
+	}, nil, nil)
+	withExecutionReadySeam(t, func(context.Context, string, time.Duration) error { return nil })
+
+	if err := w.handleJob(context.Background(), executionJob("exec-online", 64)); err != nil {
+		t.Fatalf("handleJob = %v, want nil", err)
+	}
+
+	if !gotCfg.RootFSReadOnly {
+		t.Fatal("execution must mount the shared runtime read-only")
+	}
+	if gotCfg.NoNetwork {
+		t.Fatal("online execution must not be offline")
+	}
+	if gotCfg.BootToken == "" {
+		t.Fatal("online execution must stamp a boot token")
+	}
+	if gotCfg.MMDSData == nil {
+		t.Fatal("online execution must deliver MMDS")
+	}
+	if got := gotCfg.MMDSData["token"]; got != gotCfg.BootToken {
+		t.Fatalf("MMDS token = %v, want %q", got, gotCfg.BootToken)
+	}
+	dns, ok := gotCfg.MMDSData["dns"].([]string)
+	if !ok || len(dns) != 2 || dns[0] != "1.1.1.1" {
+		t.Fatalf("MMDS dns = %v, want [1.1.1.1 8.8.8.8]", gotCfg.MMDSData["dns"])
+	}
+}
+
+// buildVMConfig must thread RootFSReadOnly to the Firecracker root drive; the
+// execution path relies on it to produce Firecracker's "root=/dev/vda ro".
+func TestBuildVMConfigPassesRootFSReadOnly(t *testing.T) {
+	cfg := InstanceConfig{
+		KernelPath:     "/kernel",
+		RuntimePath:    "/rootfs",
+		SocketPath:     "/tmp/x.sock",
+		NoNetwork:      true,
+		RootFSReadOnly: true,
+	}
+	got := buildVMConfig(cfg, instanceNetwork{}, nil, nil)
+	if !got.RootFSReadOnly {
+		t.Fatal("buildVMConfig dropped RootFSReadOnly")
+	}
+	if got.RootFSPath != "/rootfs" {
+		t.Fatalf("RootFSPath = %q, want /rootfs", got.RootFSPath)
+	}
+}
+
 // A failed handshake is a provisioning failure: no ACK, the half-built
 // workspace is removed so a redelivery can recreate it, and the in-flight
 // marker is cleared.

@@ -619,6 +619,23 @@ func buildJobMMDSData(bootToken string, job protocol.Job, dns []string, nonce st
 	return data
 }
 
+// buildExecutionMMDSData assembles the MMDS payload for a persistent execution.
+// Exec-service mode is selected by the /init argv (`aether-env --exec-service`),
+// not by a mode field, so the payload carries only what the guest bootstrap
+// needs: the token it must match, the environment to apply, and the DNS list to
+// render into /etc/resolv.conf. Listeners/commands are delivered per exec over
+// the vsock control protocol, not via MMDS.
+func buildExecutionMMDSData(bootToken string, job protocol.Job, dns []string) map[string]interface{} {
+	data := map[string]interface{}{
+		"token": bootToken,
+		"env":   job.EnvVars,
+	}
+	if len(dns) > 0 {
+		data["dns"] = dns
+	}
+	return data
+}
+
 // workerID returns the id recorded on job records. It falls back to the
 // configured id for bare Worker literals built without NewWorker.
 func (w *Worker) workerID() string {
