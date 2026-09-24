@@ -239,3 +239,46 @@ func TestCollectExecIgnoresOtherIDs(t *testing.T) {
 		t.Fatalf("Stdout = %q, want %q", got.Stdout, "mine")
 	}
 }
+
+// StreamExec must invoke the callback for every event belonging to id, in
+// order, while still returning the aggregate. It is what the live stream and
+// the synchronous collector share, so their views cannot diverge.
+func TestStreamExecInvokesCallbackPerEvent(t *testing.T) {
+	var buf bytes.Buffer
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStarted, ID: "e1", PID: 12})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "other", Data: []byte("noise")})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventStdout, ID: "e1", Data: []byte("hi")})
+	_ = WriteMessage(&buf, ExecEvent{Type: EventExited, ID: "e1", ExitCode: 3})
+
+	var seen []ExecEvent
+	got, err := StreamExec(bytes.NewReader(buf.Bytes()), "e1", func(ev ExecEvent) {
+		seen = append(seen, ev)
+	})
+	if err != nil {
+		t.Fatalf("StreamExec: %v", err)
+	}
+	if len(seen) != 3 {
+		t.Fatalf("callback saw %d events, want 3", len(seen))
+	}
+	if seen[0].Type != EventStarted || seen[0].PID != 12 {
+		t.Fatalf("first callback event = %+v, want started pid 12", seen[0])
+	}
+	if got.Stdout != "hi" || got.ExitCode != 3 {
+		t.Fatalf("aggregate = %+v, want stdout hi exit 3", got)
+	}
+	// The callback still fires when the aggregate is over the byte cap. Each
+	// chunk stays under the message cap; together they exceed MaxExecStreamBytes.
+	var big bytes.Buffer
+	chunk := make([]byte, 2<<20)
+	for i := 0; i < 3; i++ {
+		_ = WriteMessage(&big, ExecEvent{Type: EventStdout, ID: "cap", Data: chunk})
+	}
+	_ = WriteMessage(&big, ExecEvent{Type: EventExited, ID: "cap"})
+	calls := 0
+	if _, err := StreamExec(bytes.NewReader(big.Bytes()), "cap", func(ExecEvent) { calls++ }); !errors.Is(err, ErrExecOutputTooLarge) {
+		t.Fatalf("err = %v, want ErrExecOutputTooLarge", err)
+	}
+	if calls != 4 {
+		t.Fatalf("callback calls = %d, want 4", calls)
+	}
+}

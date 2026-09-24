@@ -90,6 +90,9 @@ const (
 	typeExec     = "exec"
 	typeShutdown = "shutdown"
 	typeCancel   = "cancel"
+	typeSignal   = "signal"
+
+	signalAckType = "signal_ack"
 
 	eventStarted = "started"
 	eventStdout  = "stdout"
@@ -114,6 +117,9 @@ type execRequest struct {
 	Cwd            string            `json:"cwd,omitempty"`
 	Env            map[string]string `json:"env,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+	// Signal carries the name for a typeSignal request. It is ignored for
+	// every other request type.
+	Signal string `json:"signal,omitempty"`
 }
 
 // execEvent mirrors shared/protocol.ExecEvent. Data is []byte so the wire is
@@ -123,10 +129,18 @@ type execEvent struct {
 	Type     string `json:"type"`
 	ID       string `json:"id,omitempty"`
 	Data     []byte `json:"data,omitempty"`
+	PID      int    `json:"pid,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
 	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+// signalAck mirrors shared/protocol.SignalAck: the reply to a typeSignal
+// request. A non-empty Error means the signal was not delivered.
+type signalAck struct {
+	Type  string `json:"type"`
+	Error string `json:"error,omitempty"`
 }
 
 func writeMessage(w io.Writer, v any) error {
@@ -282,6 +296,45 @@ func (c *execControl) recordPID(pid int) (cancelNow bool) {
 	return cancelNow
 }
 
+// signalWhitelist is deliberately small: only the signals a caller can safely
+// and meaningfully deliver to a running command's process group. Anything else
+// is rejected rather than passed to syscall.Kill, which would let a crafted
+// request deliver an arbitrary signal (including real-time signals with
+// side effects) into the guest.
+var signalWhitelist = map[string]syscall.Signal{
+	"SIGTERM": syscall.SIGTERM,
+	"SIGINT":  syscall.SIGINT,
+	"SIGHUP":  syscall.SIGHUP,
+	"SIGKILL": syscall.SIGKILL,
+}
+
+// signalRunningExec delivers a whitelisted signal to the process group of the
+// exec currently holding the gate. It never touches the gate itself: a signal
+// is orthogonal to exec admission, so the service stays usable whether or not
+// an exec is running.
+func signalRunningExec(name string) error {
+	sig, ok := signalWhitelist[name]
+	if !ok {
+		return fmt.Errorf("unsupported signal %q", name)
+	}
+	execControlMu.Lock()
+	c := runningExec
+	pid := 0
+	if c != nil {
+		pid = c.pid
+	}
+	execControlMu.Unlock()
+	if pid <= 0 {
+		return errors.New("no exec is running")
+	}
+	// Negative pid targets the whole process group so a shell wrapper cannot
+	// swallow the signal before it reaches the command.
+	if err := syscall.Kill(-pid, sig); err != nil {
+		return fmt.Errorf("signal %s: %w", name, err)
+	}
+	return nil
+}
+
 // runExecService is the long-lived guest control service. It never returns on
 // its own: it accepts control connections forever, serving each on its own
 // goroutine. A guest reset (Shutdown) terminates it by rebooting the VM.
@@ -334,16 +387,20 @@ func serveControlConn(conn *os.File) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	// The reader runs concurrently so a cancel can be honoured while an exec is
-	// in flight; requests are served one at a time on this goroutine.
+	// One writer per connection shared by the event pumps and the control
+	// reader (a signal ack), so concurrent writes cannot interleave.
+	cw := &connWriter{w: conn}
+
+	// The reader runs concurrently so a cancel or signal can be honoured while
+	// an exec is in flight; requests are served one at a time on this goroutine.
 	reqs := make(chan execRequest)
-	go controlReader(conn, br, reqs, done)
+	go controlReader(conn, br, reqs, done, cw)
 
 	for req := range reqs {
 		switch req.Type {
 		case typeExec, "":
 			if !execActive.CompareAndSwap(false, true) {
-				_ = writeMessage(conn, execEvent{
+				_ = cw.send(execEvent{
 					Type:     eventExited,
 					ID:       req.ID,
 					ExitCode: execBusyExitCode,
@@ -352,12 +409,12 @@ func serveControlConn(conn *os.File) {
 				})
 				continue
 			}
-			runExecGuarded(conn, req)
+			runExecGuarded(cw, conn, req)
 		case typeShutdown:
 			shutdownGuest()
 			return
 		default:
-			_ = writeMessage(conn, execEvent{
+			_ = cw.send(execEvent{
 				Type:     eventExited,
 				ID:       req.ID,
 				ExitCode: 1,
@@ -371,7 +428,7 @@ func serveControlConn(conn *os.File) {
 // released on every path, including a panic in a handler. Without the defer a
 // panicking or stuck handler would weld the gate shut and make every later exec
 // fail busy until the VM is destroyed.
-func runExecGuarded(conn *os.File, req execRequest) {
+func runExecGuarded(cw *connWriter, conn *os.File, req execRequest) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "aether-env: exec handler panic: %v\n", r)
@@ -383,14 +440,16 @@ func runExecGuarded(conn *os.File, req execRequest) {
 	}()
 	// Clear any idle read deadline the reader installed before it saw this exec.
 	_ = conn.SetReadDeadline(time.Time{})
-	serveExec(conn, req)
+	serveExec(cw, req)
 }
 
 // controlReader reads control messages and forwards exec requests to the
-// serving loop. A cancel is handled inline (killing the running exec) so it can
-// be honoured while an exec is in flight. It returns when the peer disconnects
-// or the idle deadline fires while no exec is running.
-func controlReader(conn *os.File, br *bufio.Reader, reqs chan<- execRequest, done <-chan struct{}) {
+// serving loop. A cancel is handled inline (killing the running exec) and a
+// signal is handled inline (delivering to the running exec's process group and
+// acknowledging it) so both can be honoured while an exec is in flight. It
+// returns when the peer disconnects or the idle deadline fires while no exec is
+// running.
+func controlReader(conn *os.File, br *bufio.Reader, reqs chan<- execRequest, done <-chan struct{}, cw *connWriter) {
 	defer close(reqs)
 	for {
 		if execActive.Load() {
@@ -412,6 +471,16 @@ func controlReader(conn *os.File, br *bufio.Reader, reqs chan<- execRequest, don
 			cancelRunningExec()
 			continue
 		}
+		if req.Type == typeSignal {
+			ack := signalAck{Type: signalAckType}
+			if err := signalRunningExec(req.Signal); err != nil {
+				ack.Error = err.Error()
+			}
+			// The ack is best-effort: if the peer is gone, the connection is
+			// about to be dropped anyway.
+			_ = cw.send(ack)
+			continue
+		}
 		select {
 		case reqs <- req:
 		case <-done:
@@ -420,50 +489,56 @@ func controlReader(conn *os.File, br *bufio.Reader, reqs chan<- execRequest, don
 	}
 }
 
-// eventSink serialises events for one exec onto one writer. stdout and stderr
-// are pumped from separate goroutines, so writes must be interlocked.
-//
-// send returns an error rather than discarding it and bounds each write with a
-// deadline, so a host that stops reading but stays connected cannot block the
-// pumps (and therefore the child) forever with the gate held.
-type eventSink struct {
+// connWriter serialises every message written to one control connection. An
+// exec streams stdout/stderr from two pump goroutines while a signal
+// acknowledgement may be written by the control reader, so the raw connection
+// must never be written concurrently. Each write is bounded with a deadline so
+// a host that stops reading but stays connected cannot block a writer (and
+// therefore the child) forever with the gate held.
+type connWriter struct {
 	mu     sync.Mutex
-	w      io.Writer
-	id     string
+	w      *os.File
 	failed bool
 }
 
 var errSinkFailed = errors.New("event sink write failed")
 
-func (s *eventSink) send(ev execEvent) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.failed {
+func (cw *connWriter) send(v any) error {
+	cw.mu.Lock()
+	defer cw.mu.Unlock()
+	if cw.failed {
 		return errSinkFailed
 	}
-	if d, ok := s.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
-		_ = d.SetWriteDeadline(time.Now().Add(sendWriteTimeout))
-	}
-	if err := writeMessage(s.w, ev); err != nil {
-		s.failed = true
+	_ = cw.w.SetWriteDeadline(time.Now().Add(sendWriteTimeout))
+	if err := writeMessage(cw.w, v); err != nil {
+		cw.failed = true
 		return err
 	}
 	return nil
+}
+
+// eventSink tags events with the exec id and forwards them through the shared
+// connection writer. stdout and stderr are pumped from separate goroutines, so
+// the writer's lock is what keeps their frames from interleaving.
+type eventSink struct {
+	w  *connWriter
+	id string
+}
+
+func (s *eventSink) send(ev execEvent) error {
+	return s.w.send(ev)
 }
 
 // serveExec runs one command and streams its result. Every failure of the
 // service itself is reported as a terminal exited event, never as a panic or a
 // dead service: a non-zero exit, a missing binary and a timeout are all normal
 // results.
-func serveExec(conn *os.File, req execRequest) {
+func serveExec(cw *connWriter, req execRequest) {
 	ctl := &execControl{}
 	setRunningExec(ctl)
 	defer clearRunningExec(ctl)
 
-	sink := &eventSink{w: conn, id: req.ID}
-	if err := sink.send(execEvent{Type: eventStarted, ID: req.ID}); err != nil {
-		return
-	}
+	sink := &eventSink{w: cw, id: req.ID}
 
 	if len(req.Argv) == 0 {
 		_ = sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: "empty argv"})
@@ -513,9 +588,21 @@ func serveExec(conn *os.File, req execRequest) {
 	_ = stdoutW.Close()
 	_ = stderrW.Close()
 
-	// Honour a cancel that raced the start.
+	// Publish the process-group id before reporting started, so a signal that
+	// races the start can still find it.
 	if ctl.recordPID(cmd.Process.Pid) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+
+	// Report started (with the guest-side process-group id) before pumping
+	// output, so started is always the first event. A failed write means the
+	// host is gone: kill the group, close the pipes and stop.
+	if err := sink.send(execEvent{Type: eventStarted, ID: req.ID, PID: cmd.Process.Pid}); err != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+		go func() { _ = cmd.Wait() }()
+		return
 	}
 	// If the host stops reading, kill the process group: an abandoned exec must
 	// not run to completion.

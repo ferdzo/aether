@@ -106,6 +106,11 @@ type Execution struct {
 	busy     bool
 	stopped  bool
 	lifetime *time.Timer
+
+	// Per-exec records (see exec_stream.go), bounded to maxExecRecords and
+	// guarded by mu. execRecordOrder records insertion order for eviction.
+	execRecords     map[string]*execRecord
+	execRecordOrder []string
 }
 
 // tryAcquire is the per-execution busy gate. It admits at most one exec at a
@@ -205,9 +210,12 @@ var (
 	listExecutions = func(r *Registry, ctx context.Context) ([]protocol.ExecutionRecord, error) {
 		return r.ListExecutions(ctx)
 	}
-	// execOnGuest runs one command against the guest service. Tests override it
-	// to avoid a real VM.
+	// execOnGuest runs one command against the guest service, invoking onEvent
+	// for each event as it arrives. Tests override it to avoid a real VM.
 	execOnGuest = runExecOnGuest
+	// signalOnGuest delivers a signal to the guest's running exec process
+	// group. Tests override it to avoid a real VM.
+	signalOnGuest = runSignalOnGuest
 	// executionWaitReady is the readiness gate (vsock handshake). Tests override
 	// it so provisioning can complete without a real guest.
 	executionWaitReady = waitExecHandshake
@@ -639,10 +647,14 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 	return nil
 }
 
-// ExecExecution runs one command on a live execution. A missing execution
-// yields errExecutionNotFound; a concurrent exec yields errExecutionBusy; a
-// guest-side busy reply is surfaced as errGuestBusy. These are distinguishable
-// so the control API can answer 404/409/502.
+// ExecExecution runs one command on a live execution and waits for its result.
+// A missing execution yields errExecutionNotFound; a concurrent exec yields
+// errExecutionBusy; a guest-side busy reply is surfaced as errGuestBusy. These
+// are distinguishable so the control API can answer 404/409/502.
+//
+// It records a per-exec record (visible via ExecRecord) and the same exec path
+// backs the streaming variant, so the synchronous and streamed results cannot
+// diverge.
 func (w *Worker) ExecExecution(ctx context.Context, id string, req protocol.ExecRequest) (protocol.ExecResult, error) {
 	exec := w.lookupExecution(id)
 	if exec == nil {
@@ -656,11 +668,12 @@ func (w *Worker) ExecExecution(ctx context.Context, id string, req protocol.Exec
 	log := logger.With("execution_id", id)
 	log.Debug("running exec", "argv", req.Argv)
 
-	res, err := execOnGuest(ctx, exec.vsockPath, id, req)
-	if err != nil {
-		return res, err
-	}
-	return res, nil
+	rec := newExecRecordState(newExecID())
+	exec.addExecRecord(rec)
+
+	res, err := execOnGuest(ctx, exec.vsockPath, id, req, rec.observe)
+	rec.complete(ctx, res, err)
+	return res, err
 }
 
 // destroyExecution tears an execution down. It is idempotent: the first caller

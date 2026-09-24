@@ -49,6 +49,13 @@ const (
 	// same control connection while the exec is still streaming events; the
 	// guest kills the exec's process group and reports a terminal event.
 	TypeCancel = "cancel"
+	// TypeSignal asks the guest to deliver a signal to the running exec's
+	// process group. It is sent on its own control connection (the exec itself
+	// owns the connection it streams on) so the guest can acknowledge it
+	// without racing the event stream.
+	TypeSignal = "signal"
+	// TypeSignalAck is the guest's reply to TypeSignal.
+	TypeSignalAck = "signal_ack"
 
 	EventStarted = "started"
 	EventStdout  = "stdout"
@@ -104,14 +111,36 @@ type Shutdown struct {
 // another command was already running. It is the authoritative busy signal;
 // callers must not infer busy from ExitCode (125 is also a legitimate command
 // exit status).
+//
+// PID is set on the started event: it is the guest-side process-group id of the
+// running command. It is informational (used by the per-exec record) and is 0
+// on every other event.
 type ExecEvent struct {
 	Type     string `json:"type"`
 	ID       string `json:"id,omitempty"`
 	Data     []byte `json:"data,omitempty"`
+	PID      int    `json:"pid,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
 	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
+}
+
+// SignalRequest asks the guest to deliver Signal to the process group of the
+// currently running exec. ID correlates the request with an exec but the guest
+// routes by its own single-exec gate; the ack reports whether delivery
+// succeeded.
+type SignalRequest struct {
+	Type   string `json:"type"`
+	ID     string `json:"id,omitempty"`
+	Signal string `json:"signal"`
+}
+
+// SignalAck is the guest's reply to a SignalRequest. A non-empty Error means
+// the signal was not delivered (unknown name, or no exec running).
+type SignalAck struct {
+	Type  string `json:"type"`
+	Error string `json:"error,omitempty"`
 }
 
 // WriteMessage encodes v as a single JSON line. json.Marshal never emits a
@@ -180,13 +209,17 @@ type ExecResult struct {
 	Error    string
 }
 
-// CollectExec drains ExecEvent messages for id from r until the terminal
+// StreamExec drains ExecEvent messages for id from r until the terminal
 // "exited" event, appending stdout and stderr separately. Events tagged with a
 // different non-empty id are ignored, so the helper stays correct if the
-// protocol later multiplexes execs on one connection. It returns whatever it
-// collected together with any read error; io.EOF before an exited event means
-// the connection closed early.
-func CollectExec(r io.Reader, id string) (ExecResult, error) {
+// protocol later multiplexes execs on one connection. onEvent, when non-nil, is
+// invoked for every event belonging to id before it is folded into the
+// aggregate; it is the hook a streaming caller uses to observe events live
+// without duplicating the read loop.
+//
+// It returns whatever it collected together with any read error; io.EOF before
+// an exited event means the connection closed early.
+func StreamExec(r io.Reader, id string, onEvent func(ExecEvent)) (ExecResult, error) {
 	var res ExecResult
 	var stdout, stderr bytes.Buffer
 	over := false
@@ -199,6 +232,9 @@ func CollectExec(r io.Reader, id string) (ExecResult, error) {
 		}
 		if id != "" && ev.ID != "" && ev.ID != id {
 			continue
+		}
+		if onEvent != nil {
+			onEvent(ev)
 		}
 		switch ev.Type {
 		case EventStdout:
@@ -226,4 +262,10 @@ func CollectExec(r io.Reader, id string) (ExecResult, error) {
 			return res, nil
 		}
 	}
+}
+
+// CollectExec drains the event stream into an aggregate result. It is
+// StreamExec with no live callback, kept as the simple synchronous entry point.
+func CollectExec(r io.Reader, id string) (ExecResult, error) {
+	return StreamExec(r, id, nil)
 }

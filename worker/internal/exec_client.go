@@ -95,10 +95,17 @@ func dialExecClient(udsPath string) (*execClient, error) {
 func (c *execClient) close() error { return c.conn.Close() }
 
 // exec sends one ExecRequest and drains its event stream into an ExecResult.
-// A guest "busy" reply is mapped to errGuestBusy. A cancelled ctx (worker
-// shutdown, or the caller's request going away) unblocks the read by expiring
-// the connection deadline.
+// A guest "busy" reply is mapped to errGuestBusy. It is execStream with no live
+// callback; the synchronous result collection stays on the one streaming path.
 func (c *execClient) exec(ctx context.Context, id string, req protocol.ExecRequest) (protocol.ExecResult, error) {
+	return c.execStream(ctx, id, req, nil)
+}
+
+// execStream sends one ExecRequest and invokes onEvent for every event as it
+// arrives, returning the aggregate result. A cancelled ctx (worker shutdown, or
+// the caller's request going away) unblocks the read by expiring the connection
+// deadline after asking the guest to cancel.
+func (c *execClient) execStream(ctx context.Context, id string, req protocol.ExecRequest, onEvent func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 	req.Type = protocol.TypeExec
 	req.ID = id
 	if err := protocol.WriteMessage(c.conn, req); err != nil {
@@ -123,7 +130,7 @@ func (c *execClient) exec(ctx context.Context, id string, req protocol.ExecReque
 		}
 	}()
 
-	res, err := protocol.CollectExec(c.br, id)
+	res, err := protocol.StreamExec(c.br, id, onEvent)
 	_ = c.conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return res, err
@@ -138,14 +145,46 @@ func (c *execClient) exec(ctx context.Context, id string, req protocol.ExecReque
 
 // runExecOnGuest runs one command against the guest service behind udsPath,
 // opening and closing its own connection. This is the production execOnGuest
-// seam (see execution.go).
-func runExecOnGuest(ctx context.Context, udsPath, id string, req protocol.ExecRequest) (protocol.ExecResult, error) {
+// seam (see execution.go). onEvent, when non-nil, observes each event live.
+func runExecOnGuest(ctx context.Context, udsPath, id string, req protocol.ExecRequest, onEvent func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 	c, err := dialExecClient(udsPath)
 	if err != nil {
 		return protocol.ExecResult{}, err
 	}
 	defer c.close()
-	return c.exec(ctx, id, req)
+	return c.execStream(ctx, id, req, onEvent)
+}
+
+// runSignalOnGuest delivers a signal to the running exec's process group by
+// opening a short-lived control connection, sending a SignalRequest and reading
+// the guest's ack. Signals ride their own connection so they never race the
+// exec's event stream.
+func runSignalOnGuest(udsPath, id, signal string) error {
+	c, err := dialExecClient(udsPath)
+	if err != nil {
+		return err
+	}
+	defer c.close()
+
+	if err := protocol.WriteMessage(c.conn, protocol.SignalRequest{
+		Type:   protocol.TypeSignal,
+		ID:     id,
+		Signal: signal,
+	}); err != nil {
+		return err
+	}
+	_ = c.conn.SetReadDeadline(time.Now().Add(execConnectTimeout + execReadSlack))
+	var ack protocol.SignalAck
+	if err := protocol.ReadMessage(c.br, &ack); err != nil {
+		return err
+	}
+	if ack.Type != protocol.TypeSignalAck {
+		return fmt.Errorf("unexpected signal ack: %+v", ack)
+	}
+	if ack.Error != "" {
+		return fmt.Errorf("%s", ack.Error)
+	}
+	return nil
 }
 
 // waitExecHandshake retries the full connect+Hello/Ready handshake until it

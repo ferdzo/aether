@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -49,6 +50,9 @@ func NewControlServer(worker *Worker, token string) *ControlServer {
 func (s *ControlServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /executions/{id}/exec", s.requireAuth(s.handleExec))
+	mux.HandleFunc("GET /executions/{id}/exec/{exec_id}", s.requireAuth(s.handleGetExecRecord))
+	mux.HandleFunc("GET /executions/{id}/exec/{exec_id}/events", s.requireAuth(s.handleExecEvents))
+	mux.HandleFunc("POST /executions/{id}/exec/{exec_id}/signal", s.requireAuth(s.handleSignal))
 	mux.HandleFunc("DELETE /executions/{id}", s.requireAuth(s.handleDestroy))
 	return mux
 }
@@ -112,10 +116,44 @@ func validControlID(w http.ResponseWriter, id string) bool {
 	return true
 }
 
+// validExecScopedID validates the second path id in exec-scoped routes. An exec
+// id is host-generated but still bounds-checked so a crafted path cannot reach
+// a map or a worker path unchecked.
+func validExecScopedID(w http.ResponseWriter, id string) bool {
+	if id == "" {
+		http.Error(w, "exec id is required", http.StatusBadRequest)
+		return false
+	}
+	if err := protocol.ValidJobID(id); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// writeExecPathError maps the execution/exec error set to the control status
+// codes used by the exec-scoped routes.
+func writeExecPathError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errExecutionNotFound), errors.Is(err, errExecNotFound):
+		http.Error(w, "exec not found", http.StatusNotFound)
+	case errors.Is(err, errExecutionBusy), errors.Is(err, errGuestBusy):
+		http.Error(w, "execution busy", http.StatusConflict)
+	case errors.Is(err, errExecNotRunning):
+		http.Error(w, "exec is not running", http.StatusConflict)
+	case errors.Is(err, errSignalInvalid):
+		http.Error(w, "unsupported signal", http.StatusBadRequest)
+	default:
+		http.Error(w, "exec failed", http.StatusBadGateway)
+	}
+}
+
 // POST /executions/{id}/exec
 //
-// 200 {exit_code, stdout, stderr, timed_out}; 404 unknown; 409 busy; 502 when
-// the guest call fails.
+// Without "stream" it blocks and returns 200 {exit_code, stdout, stderr,
+// timed_out}; 404 unknown; 409 busy; 502 when the guest call fails. With
+// "stream": true it responds text/event-stream and streams the events until the
+// terminal exited event.
 func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if !validControlID(w, id) {
@@ -127,6 +165,7 @@ func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		Cwd            string            `json:"cwd"`
 		Env            map[string]string `json:"env"`
 		TimeoutSeconds int               `json:"timeout_seconds"`
+		Stream         bool              `json:"stream"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -145,12 +184,28 @@ func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.worker.ExecExecution(r.Context(), id, protocol.ExecRequest{
+	execReq := protocol.ExecRequest{
 		Argv:           req.Argv,
 		Cwd:            req.Cwd,
 		Env:            req.Env,
 		TimeoutSeconds: req.TimeoutSeconds,
-	})
+	}
+
+	if req.Stream {
+		rec, err := s.worker.StartExecStream(r.Context(), id, execReq)
+		if err != nil {
+			writeExecPathError(w, err)
+			return
+		}
+		// The exec id is host-generated; surface it before the SSE headers so a
+		// caller can address the record and the event buffer afterwards.
+		w.Header().Set("X-Exec-ID", rec.ID)
+		// A reconnect header on a brand-new exec is meaningless; start at 0.
+		streamExecRecord(w, r, rec, 0)
+		return
+	}
+
+	res, err := s.worker.ExecExecution(r.Context(), id, execReq)
 	switch {
 	case errors.Is(err, errExecutionNotFound):
 		http.Error(w, "execution not found", http.StatusNotFound)
@@ -176,6 +231,174 @@ func (s *ControlServer) handleExec(w http.ResponseWriter, r *http.Request) {
 		"stderr_b64": base64.StdEncoding.EncodeToString([]byte(res.Stderr)),
 		"timed_out":  res.TimedOut,
 	})
+}
+
+// GET /executions/{id}/exec/{exec_id} → the stored record as JSON, 404 unknown.
+func (s *ControlServer) handleGetExecRecord(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	execID := r.PathValue("exec_id")
+	if !validControlID(w, id) || !validExecScopedID(w, execID) {
+		return
+	}
+	view, err := s.worker.ExecRecord(id, execID)
+	if err != nil {
+		writeExecPathError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(view)
+}
+
+// GET /executions/{id}/exec/{exec_id}/events → SSE: attach to a running exec, or
+// replay a finished one's buffer, then close. 404 for an unknown exec.
+func (s *ControlServer) handleExecEvents(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	execID := r.PathValue("exec_id")
+	if !validControlID(w, id) || !validExecScopedID(w, execID) {
+		return
+	}
+	exec := s.worker.lookupExecution(id)
+	if exec == nil {
+		http.Error(w, "exec not found", http.StatusNotFound)
+		return
+	}
+	rec, ok := exec.getExecRecord(execID)
+	if !ok {
+		http.Error(w, "exec not found", http.StatusNotFound)
+		return
+	}
+	after := parseLastEventID(r.Header.Get("Last-Event-ID"))
+	streamExecRecord(w, r, rec, after)
+}
+
+// POST /executions/{id}/exec/{exec_id}/signal
+//
+// 200 on delivery, 404 unknown exec, 409 when not running, 400 invalid signal,
+// 502 on a transport failure.
+func (s *ControlServer) handleSignal(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	execID := r.PathValue("exec_id")
+	if !validControlID(w, id) || !validExecScopedID(w, execID) {
+		return
+	}
+
+	var req struct {
+		Signal string `json:"signal"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxControlBodyBytes)).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.worker.SignalExec(id, execID, req.Signal); err != nil {
+		if !errors.Is(err, errSignalInvalid) {
+			logger.Warn("signal delivery failed", "execution_id", id, "exec_id", execID, "signal", req.Signal, "error", err)
+		}
+		writeExecPathError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"id":      id,
+		"exec_id": execID,
+		"signal":  req.Signal,
+		"state":   "delivered",
+	})
+}
+
+// sseWriteTimeout bounds a single SSE write to a slow client. The exec is never
+// affected by this: a write past the deadline fails and only this handler
+// unwinds.
+const sseWriteTimeout = 30 * time.Second
+
+// parseLastEventID parses a Last-Event-ID header. Anything malformed, absent or
+// empty means "from the beginning" (0). It never fails the request: a resume is
+// best-effort and the buffer's loss marker reports a dropped position.
+func parseLastEventID(h string) uint64 {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return 0
+	}
+	n, err := strconv.ParseUint(h, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// writeSSEEvent frames one event as event/id/data. seq == 0 omits the id (used
+// for the loss marker, which must not advance a client's Last-Event-ID).
+func writeSSEEvent(w http.ResponseWriter, seq uint64, ev protocol.ExecEvent) error {
+	b, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	if seq == 0 {
+		_, err = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, b)
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: %s\nid: %d\ndata: %s\n\n", ev.Type, seq, b)
+	return err
+}
+
+// streamExecRecord streams buffered events to w, following the exec live until
+// its terminal event. It is the one SSE renderer used by both the initial
+// streamed exec and a reconnect; after afterSeq it resumes from the buffer.
+//
+// The writer (the exec goroutine) never touches w, so a slow client cannot
+// block the exec. Deadlines bound each write so a stalled client unwinds.
+func streamExecRecord(w http.ResponseWriter, r *http.Request, rec *execRecord, afterSeq uint64) {
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	_ = rc.Flush()
+
+	last := afterSeq
+
+	// A disconnected client must unblock this handler promptly even if the exec
+	// is silent: wake the buffer when the request context is cancelled. The
+	// watcher is scoped to this reader and does not touch the exec or the
+	// buffer's shared state.
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			rec.buf.wake()
+		case <-stopWatch:
+		}
+	}()
+
+	for {
+		events, lost, done, floor := rec.buf.waitAndRead(last, r.Context().Done())
+		if lost {
+			// Deadlines are best-effort: a ResponseWriter that does not support
+			// them (or a test recorder) must not abort the stream.
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+			_, _ = fmt.Fprintf(w, "event: lost\ndata: {\"lost\":true}\n\n")
+			_ = rc.Flush()
+			if floor > 0 {
+				last = floor - 1
+			}
+		}
+		for _, be := range events {
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+			if err := writeSSEEvent(w, be.Seq, be.Event); err != nil {
+				return
+			}
+			last = be.Seq
+			if err := rc.Flush(); err != nil {
+				return
+			}
+		}
+		if done {
+			return
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+	}
 }
 
 // DELETE /executions/{id} → destroy; idempotent.

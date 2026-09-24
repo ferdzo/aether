@@ -27,6 +27,13 @@ func GenerateJobID() string {
 	return "job-" + xid.New().String()
 }
 
+// GenerateExecID returns an id for one exec within a persistent execution. It
+// is distinct from a job id because it names a per-exec record, not a queued
+// job.
+func GenerateExecID() string {
+	return "exec-" + xid.New().String()
+}
+
 func GetWorkerID() string {
 	if id := os.Getenv("AETHER_WORKER_ID"); id != "" {
 		return cleanID(id)

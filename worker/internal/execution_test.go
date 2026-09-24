@@ -44,7 +44,7 @@ func withExecutionRecordSeams(t *testing.T,
 	t.Cleanup(func() { putExecution, getExecution = prevPut, prevGet })
 }
 
-func withExecOnGuest(t *testing.T, fn func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error)) {
+func withExecOnGuest(t *testing.T, fn func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error)) {
 	t.Helper()
 	prev := execOnGuest
 	if fn != nil {
@@ -313,7 +313,7 @@ func TestExecutionBusyGate(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		close(started)
 		<-release
 		return protocol.ExecResult{ExitCode: 0, Stdout: "done"}, nil
@@ -343,7 +343,7 @@ func TestExecutionBusyGate(t *testing.T) {
 	}
 
 	// After the first exec releases the gate, another one is admitted.
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		return protocol.ExecResult{ExitCode: 0, Stdout: "again"}, nil
 	})
 	if _, err := w.ExecExecution(context.Background(), "busy-1", protocol.ExecRequest{Argv: []string{"echo", "again"}}); err != nil {
@@ -404,7 +404,7 @@ func TestDestroyExecutionIdempotentRecordsStopped(t *testing.T) {
 		t.Fatal("destroyed execution still registered")
 	}
 	// A later exec is rejected.
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		t.Fatal("exec must not reach the guest after destroy")
 		return protocol.ExecResult{}, nil
 	})
