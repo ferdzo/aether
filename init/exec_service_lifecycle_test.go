@@ -53,7 +53,7 @@ func runOneExec(t *testing.T, req execRequest) (execEvent, []byte) {
 		}
 	}()
 	go func() {
-		serveExec(w, req)
+		serveExec(&connWriter{w: w}, req)
 		execActive.Store(false)
 	}()
 

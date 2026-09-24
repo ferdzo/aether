@@ -375,6 +375,161 @@ func TestDeleteUnknownIs404(t *testing.T) {
 	}
 }
 
+func TestGetExecRecordProxiesToWorker(t *testing.T) {
+	var gotMethod, gotPath string
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"exec_id":"exec-1","state":"done","exit_code":7}`)
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	rec := do(t, api, http.MethodGet, "/e1/exec/exec-1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	if gotMethod != http.MethodGet || gotPath != "/executions/e1/exec/exec-1" {
+		t.Fatalf("worker saw %s %s", gotMethod, gotPath)
+	}
+	if !strings.Contains(rec.Body.String(), `"exit_code":7`) {
+		t.Fatalf("body = %s", rec.Body.String())
+	}
+}
+
+func TestGetExecRecordUnknownIs404(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = &stubStore{fn: func(string) (*protocol.ExecutionRecord, error) { return nil, ErrExecutionNotFound }}
+	if rec := do(t, api, http.MethodGet, "/missing/exec/exec-1", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d want 404", rec.Code)
+	}
+}
+
+func TestGetExecRecordRejectsInvalidScopedID(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = readyStore("e1")
+	if rec := do(t, api, http.MethodGet, "/e1/exec/a%20b", ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d want 400", rec.Code)
+	}
+}
+
+func TestExecEventsProxiesSSEWithLastEventID(t *testing.T) {
+	var gotLastEventID string
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLastEventID = r.Header.Get("Last-Event-ID")
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: stdout\nid: 5\ndata: {\"type\":\"stdout\"}\n\nevent: exited\nid: 6\ndata: {\"type\":\"exited\"}\n\n")
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	req := httptest.NewRequest(http.MethodGet, "/e1/exec/exec-1/events", nil)
+	req.Header.Set("Last-Event-ID", "4")
+	rec := httptest.NewRecorder()
+	api.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type = %q", ct)
+	}
+	if gotLastEventID != "4" {
+		t.Fatalf("worker saw Last-Event-ID = %q, want 4", gotLastEventID)
+	}
+	if !strings.Contains(rec.Body.String(), "id: 5\n") || !strings.Contains(rec.Body.String(), "event: exited\n") {
+		t.Fatalf("stream body = %q", rec.Body.String())
+	}
+}
+
+func TestExecStreamTrueProxiesSSE(t *testing.T) {
+	var gotBody string
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: stdout\nid: 1\ndata: {\"type\":\"stdout\"}\n\n")
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	rec := do(t, api, http.MethodPost, "/e1/exec", `{"argv":["sh","-c","echo tick"],"stream":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d want 200: %s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+	var proxied map[string]interface{}
+	if err := json.Unmarshal([]byte(gotBody), &proxied); err != nil {
+		t.Fatalf("proxied body not json: %v (%s)", err, gotBody)
+	}
+	if proxied["stream"] != true {
+		t.Fatalf("proxied body dropped stream flag: %s", gotBody)
+	}
+	if !strings.Contains(rec.Body.String(), "event: stdout\n") {
+		t.Fatalf("body = %q", rec.Body.String())
+	}
+}
+
+func TestSignalProxiesStatus(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "exec is not running", http.StatusConflict)
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	if rec := do(t, api, http.MethodPost, "/e1/exec/exec-1/signal", `{"signal":"SIGTERM"}`); rec.Code != http.StatusConflict {
+		t.Fatalf("got %d want 409: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSignalMapsWorker401To502(t *testing.T) {
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer worker.Close()
+
+	api, _ := newTestAPI(t)
+	api.controlToken = "wrong"
+	addr := strings.TrimPrefix(worker.URL, "http://")
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		return &protocol.ExecutionRecord{ID: id, State: protocol.ExecutionStateReady, WorkerAddr: addr}, nil
+	}}
+
+	if rec := do(t, api, http.MethodPost, "/e1/exec/exec-1/signal", `{"signal":"SIGTERM"}`); rec.Code != http.StatusBadGateway {
+		t.Fatalf("got %d want 502: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSignalUnknownExecutionIs404(t *testing.T) {
+	api, _ := newTestAPI(t)
+	api.records = &stubStore{fn: func(string) (*protocol.ExecutionRecord, error) { return nil, ErrExecutionNotFound }}
+	if rec := do(t, api, http.MethodPost, "/missing/exec/exec-1/signal", `{"signal":"SIGTERM"}`); rec.Code != http.StatusNotFound {
+		t.Fatalf("got %d want 404", rec.Code)
+	}
+}
+
 func TestAuthRequiredWhenConfigured(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rc, err := internal.NewRedisClient(mr.Addr())

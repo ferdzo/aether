@@ -34,7 +34,7 @@ func registerTestExecution(w *Worker, id string) {
 
 func TestControlExecSuccess(t *testing.T) {
 	w := newJobWorker(t)
-	withExecOnGuest(t, func(_ context.Context, _ string, id string, req protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(_ context.Context, _ string, id string, req protocol.ExecRequest, _ func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		if id != "c1" {
 			t.Fatalf("guest exec id = %q, want c1", id)
 		}
@@ -88,7 +88,7 @@ func TestControlExecBusyIs409(t *testing.T) {
 
 func TestControlExecGuestBusyIs409(t *testing.T) {
 	w := newJobWorker(t)
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		return protocol.ExecResult{ExitCode: guestBusyExitCode}, errGuestBusy
 	})
 	registerTestExecution(w, "c3")
@@ -101,7 +101,7 @@ func TestControlExecGuestBusyIs409(t *testing.T) {
 
 func TestControlExecGuestFailureIs502(t *testing.T) {
 	w := newJobWorker(t)
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		return protocol.ExecResult{}, context.DeadlineExceeded
 	})
 	registerTestExecution(w, "c4")
@@ -165,7 +165,7 @@ func TestControlRejectsInvalidID(t *testing.T) {
 
 func TestControlAuth(t *testing.T) {
 	w := newJobWorker(t)
-	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest) (protocol.ExecResult, error) {
+	withExecOnGuest(t, func(context.Context, string, string, protocol.ExecRequest, func(protocol.ExecEvent)) (protocol.ExecResult, error) {
 		return protocol.ExecResult{ExitCode: 0, Stdout: "ok"}, nil
 	})
 	registerTestExecution(w, "c7")

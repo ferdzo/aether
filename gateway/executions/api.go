@@ -1,6 +1,7 @@
 package executions
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -111,6 +112,9 @@ func (api *ExecutionsAPI) Routes() chi.Router {
 	r.Post("/", requireAuth(api.Create))
 	r.Get("/{id}", requireAuth(api.Get))
 	r.Post("/{id}/exec", requireAuth(api.Exec))
+	r.Get("/{id}/exec/{exec_id}", requireAuth(api.GetExecRecord))
+	r.Get("/{id}/exec/{exec_id}/events", requireAuth(api.ExecEvents))
+	r.Post("/{id}/exec/{exec_id}/signal", requireAuth(api.Signal))
 	r.Delete("/{id}", requireAuth(api.Delete))
 	return r
 }
@@ -325,6 +329,7 @@ func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 		Cwd            string            `json:"cwd"`
 		Env            map[string]string `json:"env"`
 		TimeoutSeconds int               `json:"timeout_seconds"`
+		Stream         bool              `json:"stream"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxExecutionBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -343,6 +348,26 @@ func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	execPath := "/executions/" + execID + "/exec"
+	if req.Stream {
+		// Stream the worker's SSE response through unchanged, flushing per
+		// chunk so the client sees events as they arrive. The worker holds the
+		// bounded buffer, so a slow gateway read cannot stall the exec.
+		body, err := json.Marshal(struct {
+			Argv           []string          `json:"argv"`
+			Cwd            string            `json:"cwd,omitempty"`
+			Env            map[string]string `json:"env,omitempty"`
+			TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
+			Stream         bool              `json:"stream"`
+		}{req.Argv, req.Cwd, req.Env, req.TimeoutSeconds, true})
+		if err != nil {
+			http.Error(w, "failed to encode exec request", http.StatusInternalServerError)
+			return
+		}
+		api.proxySSE(w, r, http.MethodPost, rec.WorkerAddr, execPath, body)
+		return
+	}
+
 	body, err := json.Marshal(protocol.ExecRequest{
 		Argv:           req.Argv,
 		Cwd:            req.Cwd,
@@ -354,7 +379,75 @@ func (api *ExecutionsAPI) Exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	api.proxy(w, r, http.MethodPost, rec.WorkerAddr, "/executions/"+execID+"/exec", body)
+	api.proxy(w, r, http.MethodPost, rec.WorkerAddr, execPath, body)
+}
+
+// GET /api/executions/{id}/exec/{exec_id}
+//
+// Proxies the owning worker's per-exec record, propagating 404/409/502.
+func (api *ExecutionsAPI) GetExecRecord(w http.ResponseWriter, r *http.Request) {
+	execID := chi.URLParam(r, "id")
+	scopedExecID := chi.URLParam(r, "exec_id")
+	if !validExecID(w, execID) || !validExecID(w, scopedExecID) {
+		return
+	}
+	rec, ok := api.lookup(w, r, execID)
+	if !ok {
+		return
+	}
+	if rec.WorkerAddr == "" {
+		http.Error(w, "execution has no worker address", http.StatusBadGateway)
+		return
+	}
+	api.proxy(w, r, http.MethodGet, rec.WorkerAddr, "/executions/"+execID+"/exec/"+scopedExecID, nil)
+}
+
+// GET /api/executions/{id}/exec/{exec_id}/events
+//
+// Proxies the owning worker's SSE event stream, forwarding Last-Event-ID so a
+// reconnect resumes where it left off. The stream is flushed per chunk.
+func (api *ExecutionsAPI) ExecEvents(w http.ResponseWriter, r *http.Request) {
+	execID := chi.URLParam(r, "id")
+	scopedExecID := chi.URLParam(r, "exec_id")
+	if !validExecID(w, execID) || !validExecID(w, scopedExecID) {
+		return
+	}
+	rec, ok := api.lookup(w, r, execID)
+	if !ok {
+		return
+	}
+	if rec.WorkerAddr == "" {
+		http.Error(w, "execution has no worker address", http.StatusBadGateway)
+		return
+	}
+	api.proxySSE(w, r, http.MethodGet, rec.WorkerAddr, "/executions/"+execID+"/exec/"+scopedExecID+"/events", nil)
+}
+
+// POST /api/executions/{id}/exec/{exec_id}/signal
+//
+// Proxies a signal delivery to the owning worker's control API and relays its
+// status (404 unknown, 409 not running, 400 invalid, 502 transport).
+func (api *ExecutionsAPI) Signal(w http.ResponseWriter, r *http.Request) {
+	execID := chi.URLParam(r, "id")
+	scopedExecID := chi.URLParam(r, "exec_id")
+	if !validExecID(w, execID) || !validExecID(w, scopedExecID) {
+		return
+	}
+	rec, ok := api.lookup(w, r, execID)
+	if !ok {
+		return
+	}
+	if rec.WorkerAddr == "" {
+		http.Error(w, "execution has no worker address", http.StatusBadGateway)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxExecutionBodyBytes))
+	if err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	api.proxy(w, r, http.MethodPost, rec.WorkerAddr, "/executions/"+execID+"/exec/"+scopedExecID+"/signal", body)
 }
 
 // DELETE /api/executions/{id}
@@ -460,3 +553,81 @@ func (api *ExecutionsAPI) proxy(w http.ResponseWriter, r *http.Request, method, 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
+
+// proxySSE forwards a streaming (text/event-stream) request to the owning
+// worker and relays its response verbatim, flushing after every chunk so events
+// are genuinely live. Non-2xx (404/409/502) bodies are relayed too, so the
+// worker's status propagates. A worker 401 is the gateway's own control-token
+// misconfiguration and is surfaced as 502, as the non-streaming proxy does.
+//
+// The Last-Event-ID request header is forwarded so a reconnect resumes from the
+// worker's buffer.
+func (api *ExecutionsAPI) proxySSE(w http.ResponseWriter, r *http.Request, method, workerAddr, path string, body []byte) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(r.Context(), method, "http://"+workerAddr+path, reader)
+	if err != nil {
+		http.Error(w, "failed to build worker request", http.StatusBadGateway)
+		return
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if api.controlToken != "" {
+		req.Header.Set("Authorization", "Bearer "+api.controlToken)
+	}
+	if last := r.Header.Get("Last-Event-ID"); last != "" {
+		req.Header.Set("Last-Event-ID", last)
+	}
+
+	resp, err := api.httpClient.Do(req)
+	if err != nil {
+		logger.Error("worker control stream failed", "worker_addr", workerAddr, "error", err)
+		http.Error(w, "worker unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Error("worker rejected the gateway control token", "worker_addr", workerAddr)
+		http.Error(w, "worker rejected control token", http.StatusBadGateway)
+		return
+	}
+
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	if execID := resp.Header.Get("X-Exec-ID"); execID != "" {
+		w.Header().Set("X-Exec-ID", execID)
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	rc := http.NewResponseController(w)
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			// Bound a stuck downstream client; the worker's buffer absorbs a
+			// slow reader, so this only unwinds this proxy handler.
+			_ = rc.SetWriteDeadline(time.Now().Add(reverseSSEWriteTimeout))
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			return
+		}
+	}
+}
+
+// reverseSSEWriteTimeout bounds one proxied SSE write to a slow client.
+const reverseSSEWriteTimeout = 30 * time.Second
