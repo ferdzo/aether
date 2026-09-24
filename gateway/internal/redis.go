@@ -50,3 +50,11 @@ func (r *RedisClient) PushJob(job *protocol.Job) error {
 func (r *RedisClient) Client() *redis.Client {
 	return r.client
 }
+
+// PublishJobCancel asks whichever worker owns jobID to cancel it. It reuses the
+// client that publishes the provision stream; cancellation is best-effort
+// pub/sub with no retry, so a worker that is down or the wrong owner simply
+// misses the message.
+func (r *RedisClient) PublishJobCancel(ctx context.Context, jobID string) error {
+	return r.client.Publish(ctx, protocol.ChannelJobCancel, jobID).Err()
+}

@@ -277,6 +277,7 @@ func main() {
 	}()
 	go scaler.Run(ctx)
 	go worker.WatchCodeUpdates(ctx)
+	go worker.WatchJobCancels(ctx)
 
 	// Start metrics HTTP server
 	go func() {

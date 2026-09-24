@@ -163,6 +163,13 @@ func TestClassifyJobMatrix(t *testing.T) {
 		{"crash with wait error", jobOutcome{WaitErr: errors.New("boom")}, protocol.JobStateFailed, -1},
 		// A sentinel is authoritative even if the deadline also fired.
 		{"sentinel wins over timeout", jobOutcome{SentinelSeen: true, SentinelCode: 7, TimedOut: true}, protocol.JobStateDone, 7},
+		// A job that already finished before the cancel stays done.
+		{"sentinel wins over cancel", jobOutcome{SentinelSeen: true, SentinelCode: 3, Cancelled: true}, protocol.JobStateDone, 3},
+		{"sentinel wins over cancel and timeout", jobOutcome{SentinelSeen: true, SentinelCode: 1, Cancelled: true, TimedOut: true}, protocol.JobStateDone, 1},
+		{"cancel no sentinel", jobOutcome{Cancelled: true}, protocol.JobStateCancelled, -1},
+		{"cancel with wait error", jobOutcome{Cancelled: true, WaitErr: errors.New("killed")}, protocol.JobStateCancelled, -1},
+		// An explicit cancel beats a deadline that fired in the same instant.
+		{"cancel wins over timeout", jobOutcome{Cancelled: true, TimedOut: true}, protocol.JobStateCancelled, -1},
 	}
 
 	for _, tc := range cases {
@@ -417,5 +424,167 @@ func TestJobRunnerRecordingFailureDoesNotChangeOutcome(t *testing.T) {
 	rec := r.Run(context.Background())
 	if rec.State != protocol.JobStateDone || rec.ExitCode != 3 {
 		t.Fatalf("record = %+v, want done/3 despite recording failure", rec)
+	}
+}
+
+// Cancel must stop the VM through the existing Stop path and produce exactly
+// one cancelled terminal record.
+func TestJobRunnerCancelStopsVMAndRecordsOnce(t *testing.T) {
+	log := newJobLog(4096, "")
+
+	var mu sync.Mutex
+	var stopCalls int
+	var recorded []protocol.JobRecord
+	release := make(chan struct{})
+
+	r := NewJobRunner(JobRunnerConfig{
+		JobID:     "job-cancel",
+		RequestID: "req-cancel",
+		WorkerID:  "worker-cancel",
+		Log:       log,
+		Wait: func() error {
+			<-release
+			return errors.New("killed")
+		},
+		Stop: func() error {
+			mu.Lock()
+			stopCalls++
+			mu.Unlock()
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+			return nil
+		},
+		Record: func(rec protocol.JobRecord) error {
+			mu.Lock()
+			recorded = append(recorded, rec)
+			mu.Unlock()
+			return nil
+		},
+	})
+
+	done := make(chan protocol.JobRecord, 1)
+	go func() { done <- r.Run(context.Background()) }()
+
+	// Cancel after Run has started waiting; the signal is buffered by the
+	// closed channel, so an early cancel is safe too.
+	time.Sleep(20 * time.Millisecond)
+	r.Cancel()
+	r.Cancel() // idempotent
+
+	var rec protocol.JobRecord
+	select {
+	case rec = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return after Cancel")
+	}
+
+	if rec.State != protocol.JobStateCancelled {
+		t.Fatalf("record = %+v, want cancelled", rec)
+	}
+	if rec.ExitCode != jobUnknownExitCode {
+		t.Fatalf("cancel exit code = %d, want %d", rec.ExitCode, jobUnknownExitCode)
+	}
+	if !strings.Contains(rec.Error, "cancel") {
+		t.Fatalf("cancel error = %q, want it to mention cancellation", rec.Error)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if stopCalls != 1 {
+		t.Fatalf("Stop called %d times, want exactly 1", stopCalls)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("record callback called %d times, want exactly 1", len(recorded))
+	}
+	if recorded[0].State != protocol.JobStateCancelled {
+		t.Fatalf("recorded state = %q, want cancelled", recorded[0].State)
+	}
+}
+
+// A cancel arriving after the job already finished must not rewrite the
+// outcome: the already-written terminal record stands and no new one appears.
+func TestJobRunnerCancelAfterCompletionIsNoop(t *testing.T) {
+	log := newJobLog(4096, "")
+
+	var recorded []protocol.JobRecord
+	r := NewJobRunner(JobRunnerConfig{
+		JobID: "job-late-cancel",
+		Log:   log,
+		Wait: func() error {
+			_, _ = log.Write([]byte("AETHER_EXIT:0\n"))
+			return nil
+		},
+		Record: func(rec protocol.JobRecord) error {
+			recorded = append(recorded, rec)
+			return nil
+		},
+	})
+
+	rec := r.Run(context.Background())
+	if rec.State != protocol.JobStateDone || rec.ExitCode != 0 {
+		t.Fatalf("record = %+v, want done/0", rec)
+	}
+
+	r.Cancel()
+
+	if len(recorded) != 1 {
+		t.Fatalf("late Cancel wrote %d records, want the original 1", len(recorded))
+	}
+	if recorded[0].State != protocol.JobStateDone {
+		t.Fatalf("late Cancel rewrote outcome to %q, want done", recorded[0].State)
+	}
+}
+
+// Cancel racing a natural exit must still produce exactly one terminal record.
+// Run with -race.
+func TestJobRunnerCancelRacesNaturalExit(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		log := newJobLog(64, "")
+		var mu sync.Mutex
+		var recorded []protocol.JobRecord
+		r := NewJobRunner(JobRunnerConfig{
+			JobID: "job-race-cancel",
+			Log:   log,
+			Wait: func() error {
+				_, _ = log.Write([]byte("AETHER_EXIT:7\n"))
+				return nil
+			},
+			Record: func(rec protocol.JobRecord) error {
+				mu.Lock()
+				recorded = append(recorded, rec)
+				mu.Unlock()
+				return nil
+			},
+		})
+
+		done := make(chan struct{})
+		go func() { r.Run(context.Background()); close(done) }()
+		r.Cancel()
+
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return")
+		}
+
+		mu.Lock()
+		n := len(recorded)
+		state := ""
+		if n == 1 {
+			state = recorded[0].State
+		}
+		mu.Unlock()
+
+		if n != 1 {
+			t.Fatalf("iteration %d: wrote %d records, want exactly 1", i, n)
+		}
+		// A sentinel is authoritative: whichever branch won the select, the
+		// record must be done/7, never cancelled.
+		if state != protocol.JobStateDone {
+			t.Fatalf("iteration %d: state = %q, want done (sentinel wins)", i, state)
+		}
 	}
 }

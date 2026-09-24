@@ -178,20 +178,27 @@ type jobOutcome struct {
 	SentinelSeen bool
 	SentinelCode int
 	TimedOut     bool
+	Cancelled    bool
 	WaitErr      error
 }
 
 // classifyJob is the pure post-hoc decision function. It never pre-sets state:
 // the outcome is derived from what actually happened, with precedence
-// sentinel > timeout > crash.
+// sentinel > cancelled > timeout > crash.
 //
-//   - a sentinel always means the supervisor reported a real exit code -> done;
+//   - a sentinel always means the supervisor reported a real exit code -> done.
+//     This is checked first so a job that finished just before an external
+//     cancel is recorded as done, not cancelled;
+//   - otherwise a cancel request -> cancelled (an explicit stop wins over a
+//     deadline that may have fired in the same instant);
 //   - otherwise a fired deadline -> timeout, 124;
 //   - otherwise the VM exited without a sentinel -> failed.
 func classifyJob(o jobOutcome) (state string, exitCode int, errMsg string) {
 	switch {
 	case o.SentinelSeen:
 		return protocol.JobStateDone, o.SentinelCode, ""
+	case o.Cancelled:
+		return protocol.JobStateCancelled, jobUnknownExitCode, "job cancelled by request"
 	case o.TimedOut:
 		return protocol.JobStateTimeout, jobTimeoutExitCode, "job exceeded timeout"
 	default:
@@ -258,6 +265,19 @@ type JobRunner struct {
 	record            func(protocol.JobRecord) error
 	heartbeat         func(protocol.JobRecord) error
 	heartbeatInterval time.Duration
+
+	// cancelCh is closed exactly once by Cancel to request cancellation. A nil
+	// channel (a runner built without NewJobRunner) is simply never ready, so
+	// waitForExit degrades to its pre-cancellation behaviour.
+	cancelCh   chan struct{}
+	cancelOnce sync.Once
+
+	// cleanup is invoked once after Run returns so the owning worker can
+	// deregister the job. It is set by the worker; standalone runners leave it
+	// nil. cleanupOnce makes the deregistration idempotent across the seam
+	// wrapper's defer and any explicit caller.
+	cleanup     func()
+	cleanupOnce sync.Once
 }
 
 // NewJobRunner builds a runner. The provided sink's nonce is aligned with the
@@ -284,7 +304,46 @@ func NewJobRunner(cfg JobRunnerConfig) *JobRunner {
 
 		heartbeat:         cfg.Heartbeat,
 		heartbeatInterval: cfg.HeartbeatInterval,
+
+		cancelCh: make(chan struct{}),
 	}
+}
+
+// Cancel requests cancellation of the running job. It is idempotent and safe to
+// call from any goroutine, including after Run has returned (in which case it is
+// a no-op because classification is post-hoc). Cancel only signals; the single
+// terminal record is always written by Run.
+func (r *JobRunner) Cancel() {
+	if r.cancelCh == nil {
+		return
+	}
+	r.cancelOnce.Do(func() { close(r.cancelCh) })
+}
+
+// cancelRequested reports whether Cancel has already been called, without
+// blocking. It lets Run let an explicit cancel win over a deadline that fired
+// in the same instant.
+func (r *JobRunner) cancelRequested() bool {
+	if r.cancelCh == nil {
+		return false
+	}
+	select {
+	case <-r.cancelCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// runCleanup invokes the worker-registered cleanup at most once. It is called
+// from the startJobRunner wrapper's deferred call, so it runs whether Run
+// returns normally or panics.
+func (r *JobRunner) runCleanup() {
+	r.cleanupOnce.Do(func() {
+		if r.cleanup != nil {
+			r.cleanup()
+		}
+	})
 }
 
 // Log exposes the console sink, mainly so callers (and tests) can inspect the
@@ -303,15 +362,24 @@ func (r *JobRunner) Run(ctx context.Context) protocol.JobRecord {
 
 	started := time.Now().UTC()
 	stopHeartbeat := r.startHeartbeat(ctx, started)
-	waitErr, timedOut := r.waitForExit(ctx)
+	waitErr, timedOut, cancelled := r.waitForExit(ctx)
 	// Stop (and wait for) the heartbeat before writing the terminal record, so a
 	// late heartbeat can never clobber it back to running.
 	stopHeartbeat()
+
+	// An explicit cancel beats a deadline that fired in the same instant. A
+	// natural exit (including one carrying a sentinel) is left untouched, so a
+	// job that finished before the cancel stays done/failed rather than being
+	// rewritten to cancelled.
+	if timedOut && r.cancelRequested() {
+		cancelled = true
+	}
 
 	state, exitCode, errMsg := classifyJob(jobOutcome{
 		SentinelSeen: r.log.SentinelSeen(),
 		SentinelCode: r.log.ExitCode(),
 		TimedOut:     timedOut,
+		Cancelled:    cancelled,
 		WaitErr:      waitErr,
 	})
 
@@ -388,11 +456,13 @@ func (r *JobRunner) startHeartbeat(ctx context.Context, started time.Time) func(
 	}
 }
 
-// waitForExit races Wait against the timeout and the context.
+// waitForExit races Wait against the timeout, a cancel request and the context.
 //
-// A fired deadline or a cancelled context stops the VM and then waits a bounded
-// grace period for Wait to return, so Run cannot hang on a wedged VMM.
-func (r *JobRunner) waitForExit(ctx context.Context) (err error, timedOut bool) {
+// A fired deadline, a cancel request or a cancelled context stops the VM and
+// then waits a bounded grace period for Wait to return, so Run cannot hang on a
+// wedged VMM. Exactly one of the branches is taken, but classification is
+// post-hoc: a sentinel already on the console still wins (see Run/classifyJob).
+func (r *JobRunner) waitForExit(ctx context.Context) (err error, timedOut bool, cancelled bool) {
 	waitCh := make(chan error, 1)
 	go func() {
 		var e error
@@ -411,15 +481,19 @@ func (r *JobRunner) waitForExit(ctx context.Context) (err error, timedOut bool) 
 
 	select {
 	case err = <-waitCh:
-		return err, false
+		return err, false, false
 	case <-timeoutC:
 		r.forceStop()
 		r.drain(waitCh)
-		return nil, true
+		return nil, true, false
+	case <-r.cancelCh:
+		r.forceStop()
+		r.drain(waitCh)
+		return nil, false, true
 	case <-ctx.Done():
 		r.forceStop()
 		r.drain(waitCh)
-		return ctx.Err(), false
+		return ctx.Err(), false, false
 	}
 }
 

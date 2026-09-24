@@ -65,6 +65,12 @@ type Worker struct {
 	netnsMgr       *network.NetnsManager
 	redis          *redis.Client
 	consumerName   string
+
+	// jobs maps a process-job id to its running runner so a cancel request can
+	// reach the exact runner. It is guarded by mu. Job runners are deliberately
+	// kept out of instances: jobs are invisible to the scaler and never
+	// registered as function instances.
+	jobs map[string]*JobRunner
 }
 
 func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClient *redis.Client) *Worker {
@@ -85,6 +91,7 @@ func NewWorker(cfg *Config, registry *Registry, codeCache *CodeCache, redisClien
 		codeCache:      codeCache,
 		redis:          redisClient,
 		consumerName:   consumerName,
+		jobs:           make(map[string]*JobRunner),
 	}
 }
 
@@ -751,9 +758,50 @@ func (w *Worker) startJob(ctx context.Context, job protocol.Job) error {
 		Heartbeat:         func(rec protocol.JobRecord) error { return w.registry.PutJob(rec) },
 	})
 
+	// Register immediately before launch so a cancel request that arrives while
+	// the runner is starting still finds it. The runner deregisters through the
+	// cleanup hook when Run returns (including on panic).
+	runner.cleanup = func() { w.deregisterJob(jobID, runner) }
+	w.registerJob(jobID, runner)
+
 	startJobRunner(ctx, runner)
 	log.Info("process job launched", "instance_id", instance.ID, "runtime", job.Runtime)
 	return nil
+}
+
+// registerJob records a running job's runner so CancelJob can reach it. Jobs
+// are deliberately kept out of w.instances: they are invisible to the scaler.
+func (w *Worker) registerJob(jobID string, runner *JobRunner) {
+	w.mu.Lock()
+	if w.jobs == nil {
+		w.jobs = make(map[string]*JobRunner)
+	}
+	w.jobs[jobID] = runner
+	w.mu.Unlock()
+}
+
+// deregisterJob removes a finished job's runner. The runner pointer is checked
+// so a late deregistration cannot delete a newer runner for the same id.
+func (w *Worker) deregisterJob(jobID string, runner *JobRunner) {
+	w.mu.Lock()
+	if w.jobs != nil && w.jobs[jobID] == runner {
+		delete(w.jobs, jobID)
+	}
+	w.mu.Unlock()
+}
+
+// CancelJob asks the runner owning jobID to stop. It reports whether a runner
+// was found locally. Cancellation is best-effort: a job that already finished,
+// or one owned by another worker, is simply not found.
+func (w *Worker) CancelJob(jobID string) bool {
+	w.mu.Lock()
+	runner := w.jobs[jobID]
+	w.mu.Unlock()
+	if runner == nil {
+		return false
+	}
+	runner.Cancel()
+	return true
 }
 
 // Test seams: unit tests override these to exercise the post-launch stages of
@@ -770,9 +818,14 @@ var (
 		return inst.StartProxy(listenPort, targetPort)
 	}
 	// startJobRunner launches the asynchronous outcome recorder for a process
-	// job. Tests override it to observe the runner without waiting on a VM.
+	// job. The goroutine is wrapped so the worker's job registry is always
+	// cleaned up when Run returns, including if it panics. Tests override it to
+	// observe the runner without waiting on a VM.
 	startJobRunner = func(ctx context.Context, runner *JobRunner) {
-		go runner.Run(ctx)
+		go func() {
+			defer runner.runCleanup()
+			runner.Run(ctx)
+		}()
 	}
 	// createJobWorkspace builds a job's workspace image. Tests override it so
 	// they exercise attachment without invoking mke2fs.
@@ -1104,6 +1157,32 @@ func (w *Worker) WatchCodeUpdates(ctx context.Context) {
 			functionID := msg.Payload
 			logger.Info("code update received", "function", functionID)
 			w.handleCodeUpdate(functionID)
+		}
+	}
+}
+
+// WatchJobCancels subscribes to the cancel channel and forwards each job id to
+// CancelJob. Cancellation is best-effort pub/sub: a publish that nobody
+// receives (worker restarting, or the job owned by another worker) is not
+// retried, and a cancel arriving after the job has finished is a no-op because
+// the runner is no longer registered.
+func (w *Worker) WatchJobCancels(ctx context.Context) {
+	pubsub := w.redis.Subscribe(ctx, protocol.ChannelJobCancel)
+	defer pubsub.Close()
+
+	logger.Info("watching for job cancellations", "channel", protocol.ChannelJobCancel)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-pubsub.Channel():
+			jobID := msg.Payload
+			if w.CancelJob(jobID) {
+				logger.Info("job cancellation requested", "job_id", jobID)
+			} else {
+				logger.Info("job cancellation for unknown local job", "job_id", jobID)
+			}
 		}
 	}
 }

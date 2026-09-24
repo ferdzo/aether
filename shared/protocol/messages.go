@@ -98,13 +98,14 @@ type JobRecord struct {
 }
 
 // Job lifecycle states. A job starts out provisioning/running and ends in
-// exactly one of done, failed or timeout.
+// exactly one of done, failed, timeout or cancelled.
 const (
 	JobStateProvisioning = "provisioning"
 	JobStateRunning      = "running"
 	JobStateDone         = "done"
 	JobStateFailed       = "failed"
 	JobStateTimeout      = "timeout"
+	JobStateCancelled    = "cancelled"
 )
 
 type WorkerNode struct {
@@ -136,9 +137,13 @@ const (
 	StreamProvisionDLQ = "stream:vm_provision:dlq"
 	StreamGroup        = "aether-workers"
 	ChannelCodeUpdate  = "channel:code_update"
-	EtcdFuncPrefix     = "/functions/"
-	EtcdWorkerPrefix   = "/workers/"
-	EtcdJobPrefix      = "/jobs/"
+	// ChannelJobCancel carries a job id to the worker owning that job. It is a
+	// best-effort pub/sub channel: a publish with no subscriber (worker
+	// restarting, or the job on another worker) is not retried.
+	ChannelJobCancel = "channel:job_cancel"
+	EtcdFuncPrefix   = "/functions/"
+	EtcdWorkerPrefix = "/workers/"
+	EtcdJobPrefix    = "/jobs/"
 )
 
 func InstanceKey(functionID, instanceID string) string {
