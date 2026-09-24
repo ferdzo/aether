@@ -170,6 +170,37 @@ func TestExecServiceSmoke(t *testing.T) {
 		t.Errorf("test7: service unusable after timeout: %+v", r)
 	}
 
+	// Test 7b: a background child that keeps stdout open must not weld the
+	// single-exec gate shut. This is the P1 regression: the old service waited
+	// for stdout/stderr pipe EOF before reaping, so `sh -c 'sleep N &'` made
+	// every later exec fail busy (125) until the VM was destroyed. The same must
+	// hold for a setsid-escaped child and with timeout_seconds 0.
+	bgCases := []struct {
+		id   string
+		argv []string
+	}{
+		{"t7b-bg", []string{"sh", "-c", "sleep 30 &"}},
+	}
+	// setsid may not be present in the rootfs; probe before using it.
+	if r := c.exec(t, "t7-probe-setsid", protocol.ExecRequest{Argv: []string{"sh", "-c", "command -v setsid"}}); r.ExitCode == 0 {
+		bgCases = append(bgCases, struct {
+			id   string
+			argv []string
+		}{"t7c-setsid", []string{"sh", "-c", "setsid sleep 30 &"}})
+	}
+	for _, tc := range bgCases {
+		r := c.exec(t, tc.id, protocol.ExecRequest{Argv: tc.argv, TimeoutSeconds: 0})
+		t.Logf("%s (background child, timeout 0): %+v", tc.id, r)
+		if r.ExitCode != 0 {
+			t.Errorf("%s: exit code = %d, want 0", tc.id, r.ExitCode)
+		}
+		// The gate must be free again immediately.
+		after := c.exec(t, tc.id+"-after", protocol.ExecRequest{Argv: []string{"echo", "still-alive"}})
+		if after.ExitCode != 0 || !strings.Contains(after.Stdout, "still-alive") {
+			t.Errorf("%s: service unusable after a background child: %+v", tc.id, after)
+		}
+	}
+
 	// Test 8: a second Exec while one is active is rejected as busy. A second
 	// control connection is opened; the service serves connections
 	// concurrently but admits only one exec at a time.
@@ -187,8 +218,8 @@ func TestExecServiceSmoke(t *testing.T) {
 	c2.send(t, protocol.ExecRequest{Type: protocol.TypeExec, ID: "busy-probe", Argv: []string{"echo", "should-not-run"}})
 	busy := c2.readEvent(t)
 	t.Logf("busy rejection: %+v", busy)
-	if busy.Type != protocol.EventExited || busy.ExitCode != 125 || !strings.Contains(strings.ToLower(busy.Error), "busy") {
-		t.Errorf("busy: got %+v, want exited/125 with a busy error", busy)
+	if busy.Type != protocol.EventExited || busy.ExitCode != 125 || !busy.Busy || !strings.Contains(strings.ToLower(busy.Error), "busy") {
+		t.Errorf("busy: got %+v, want exited/125 flagged Busy with a busy error", busy)
 	}
 	// Drain the still-running sleep so the service is idle again.
 	busyRes, err := protocol.CollectExec(c.br, "busy-sleep")

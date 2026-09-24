@@ -10,6 +10,7 @@ import (
 	"strings"
 	"syscall"
 
+	"aether/gateway/executions"
 	"aether/gateway/functions"
 	"aether/gateway/internal"
 	"aether/gateway/jobs"
@@ -118,6 +119,7 @@ func main() {
 	}
 	functionsAPI := functions.NewFunctionsAPI(dbClient, minioClient, redisClient.Client(), functions.NewLokiClient(lokiURL), os.Getenv("AUTH_TOKEN"))
 	jobsAPI := jobs.NewJobsAPI(redisClient, etcdClient, os.Getenv("AUTH_TOKEN"))
+	executionsAPI := executions.NewExecutionsAPI(redisClient, etcdClient, os.Getenv("AUTH_TOKEN"), os.Getenv("WORKER_CONTROL_TOKEN"))
 	discovery := internal.NewDiscovery(etcdClient)
 	handler := internal.NewHandler(discovery, redisClient, dbClient)
 
@@ -127,6 +129,7 @@ func main() {
 	r.HandleFunc("/functions/{funcID}/*", handler.Handler)
 	r.Mount("/api/functions", functionsAPI.Routes())
 	r.Mount("/api/jobs", jobsAPI.Routes())
+	r.Mount("/api/executions", executionsAPI.Routes())
 	r.Handle("/metrics", metrics.Handler())
 
 	go func() {

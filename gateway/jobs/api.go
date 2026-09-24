@@ -30,6 +30,10 @@ const jobCancelRequestedState = "cancel_requested"
 // request with 502 instead of hanging it.
 const jobRecordTimeout = 2 * time.Second
 
+// maxJobBodyBytes bounds a submit request body so a large upload cannot make
+// the gateway buffer without bound.
+const maxJobBodyBytes = 1 << 20 // 1 MiB
+
 // ErrJobNotFound is returned by a JobRecordStore when no record exists for an
 // id, so handlers can map it to 404 separately from a transport error.
 var ErrJobNotFound = errors.New("job record not found")
@@ -115,7 +119,7 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMB    int               `json:"workspace_mb"`
 		EnvVars        map[string]string `json:"env_vars"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJobBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -155,6 +159,10 @@ func (api *JobsAPI) Submit(w http.ResponseWriter, r *http.Request) {
 	// positive timeout rather than silently allowing an unbounded job.
 	if req.TimeoutSeconds <= 0 {
 		http.Error(w, "timeout_seconds must be positive", http.StatusBadRequest)
+		return
+	}
+	if req.TimeoutSeconds > protocol.MaxTimeoutSeconds {
+		http.Error(w, fmt.Sprintf("timeout_seconds must be at most %d", protocol.MaxTimeoutSeconds), http.StatusBadRequest)
 		return
 	}
 	// Reject a caller-supplied id that could not be fetched back: the router

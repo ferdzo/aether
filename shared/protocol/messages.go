@@ -68,6 +68,14 @@ type Job struct {
 	WorkspaceMB int `json:"workspace_mb,omitempty"`
 }
 
+// MaxTimeoutSeconds bounds a job or execution lifetime. 24 hours is far beyond
+// any realistic workload, and the ceiling keeps int-to-time.Duration
+// conversions from overflowing (a huge value would otherwise produce a negative
+// duration, making timers fire immediately and read deadlines land in the
+// past). The gateway and the worker control API reject larger values; callers
+// that bypass them must saturate rather than overflow.
+const MaxTimeoutSeconds = 24 * 60 * 60
+
 // MaxWorkspaceMB bounds a job's requested workspace size. It is shared by the
 // gateway (which rejects oversized submissions up front) and the worker (which
 // refuses to hand mke2fs an absurd size). 64 GiB is far beyond any realistic

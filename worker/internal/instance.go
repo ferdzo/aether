@@ -90,6 +90,12 @@ type InstanceConfig struct {
 	// instead of the default per-instance telemetry writers. Process jobs use
 	// it to attach their bounded jobLog sink. Nil preserves the default.
 	ConsoleWriter io.Writer
+
+	// Vsock, when non-nil, attaches one virtio-vsock device to the VM. It is
+	// how persistent executions reach the guest exec service (see
+	// shared/protocol/exec.go); function instances and process jobs leave it
+	// nil and are byte-for-byte unchanged.
+	Vsock *vm.VsockSpec
 }
 
 func (i *Instance) IncrementActiveRequests() {
@@ -292,6 +298,7 @@ func buildVMConfig(cfg InstanceConfig, np instanceNetwork, stdout, stderr io.Wri
 		MMDSData:      cfg.MMDSData,
 		Stdout:        stdout,
 		Stderr:        stderr,
+		Vsock:         cfg.Vsock,
 	}
 }
 

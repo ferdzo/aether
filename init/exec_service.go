@@ -49,6 +49,33 @@ const (
 	// execBusyExitCode is reported when an Exec arrives while another is
 	// running. 125 is the shell's "command cannot execute" convention.
 	execBusyExitCode = 125
+
+	// maxTimeoutSeconds bounds a guest-side exec timeout, in lockstep with
+	// protocol.MaxTimeoutSeconds. It keeps an over-large value from overflowing
+	// time.Duration (producing an immediate, bogus timeout).
+	maxTimeoutSeconds = 24 * 60 * 60
+
+	// maxMessageBytes bounds one newline-delimited protocol message, in lockstep
+	// with maxMessageBytes in shared/protocol/exec.go. A peer that sends an
+	// unterminated line must not be able to grow guest memory without bound.
+	maxMessageBytes = 4 << 20 // 4 MiB
+
+	// sendWriteTimeout bounds a single event write to the host. If the host
+	// stops reading but stays connected, a write past this deadline fails and
+	// the exec is abandoned instead of blocking the pumps (and the child)
+	// forever with the single-exec gate held.
+	sendWriteTimeout = 15 * time.Second
+
+	// pipeDrainGrace is how long serveExec waits for the output pipes to reach
+	// EOF after the child is reaped. A child that leaves a pipe open (a
+	// background process that inherited stdout, or a setsid-escaped daemon) must
+	// not hold the gate; past the grace the pipes are closed explicitly.
+	pipeDrainGrace = 500 * time.Millisecond
+
+	// controlIdleTimeout closes a control connection that sends nothing while no
+	// exec is running, so an abandoned connection cannot pin a goroutine
+	// forever. It is not applied while an exec is in flight.
+	controlIdleTimeout = 10 * time.Minute
 )
 
 // --- wire types -------------------------------------------------------------
@@ -62,6 +89,7 @@ const (
 	typeReady    = "ready"
 	typeExec     = "exec"
 	typeShutdown = "shutdown"
+	typeCancel   = "cancel"
 
 	eventStarted = "started"
 	eventStdout  = "stdout"
@@ -88,12 +116,16 @@ type execRequest struct {
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 }
 
+// execEvent mirrors shared/protocol.ExecEvent. Data is []byte so the wire is
+// byte-exact (JSON base64-encodes byte slices); a string would corrupt invalid
+// UTF-8 and a chunk boundary that split a rune.
 type execEvent struct {
 	Type     string `json:"type"`
 	ID       string `json:"id,omitempty"`
-	Data     string `json:"data,omitempty"`
+	Data     []byte `json:"data,omitempty"`
 	ExitCode int    `json:"exit_code,omitempty"`
 	TimedOut bool   `json:"timed_out,omitempty"`
+	Busy     bool   `json:"busy,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -117,6 +149,9 @@ func readMessage(r io.Reader, v any) error {
 				break
 			}
 			line = append(line, one[0])
+			if len(line) > maxMessageBytes {
+				return fmt.Errorf("exec protocol: message exceeds %d bytes", maxMessageBytes)
+			}
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
@@ -193,6 +228,60 @@ func acceptVsock(fd int) (int, error) {
 // rather than queued.
 var execActive atomic.Bool
 
+// runningExec is the exec currently holding the gate, if any. It lets the
+// control reader cancel an in-flight exec without blocking the exec itself.
+var (
+	execControlMu sync.Mutex
+	runningExec   *execControl
+)
+
+// execControl is the cancellation handle for one running exec.
+type execControl struct {
+	pid       int
+	cancelled bool
+}
+
+func setRunningExec(c *execControl) {
+	execControlMu.Lock()
+	runningExec = c
+	execControlMu.Unlock()
+}
+
+func clearRunningExec(c *execControl) {
+	execControlMu.Lock()
+	if runningExec == c {
+		runningExec = nil
+	}
+	execControlMu.Unlock()
+}
+
+// cancelRunningExec kills the process group of the running exec, if any. A
+// cancel that arrives before the child is started is remembered so serveExec
+// kills it as soon as it knows the pid.
+func cancelRunningExec() {
+	execControlMu.Lock()
+	c := runningExec
+	pid := 0
+	if c != nil {
+		c.cancelled = true
+		pid = c.pid
+	}
+	execControlMu.Unlock()
+	if pid > 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}
+}
+
+// recordPID publishes the child's process-group id and reports whether a cancel
+// arrived before it was known.
+func (c *execControl) recordPID(pid int) (cancelNow bool) {
+	execControlMu.Lock()
+	c.pid = pid
+	cancelNow = c.cancelled
+	execControlMu.Unlock()
+	return cancelNow
+}
+
 // runExecService is the long-lived guest control service. It never returns on
 // its own: it accepts control connections forever, serving each on its own
 // goroutine. A guest reset (Shutdown) terminates it by rebooting the VM.
@@ -225,8 +314,12 @@ func runExecService() error {
 // messages until the peer disconnects or asks for Shutdown.
 func serveControlConn(conn *os.File) {
 	defer conn.Close()
+	done := make(chan struct{})
+	defer close(done)
 	br := bufio.NewReader(conn)
 
+	// Bound the handshake so an idle peer cannot pin this goroutine.
+	_ = conn.SetReadDeadline(time.Now().Add(controlIdleTimeout))
 	var h hello
 	if err := readMessage(br, &h); err != nil {
 		fmt.Fprintf(os.Stderr, "aether-env: control handshake read: %v\n", err)
@@ -239,15 +332,14 @@ func serveControlConn(conn *os.File) {
 	if err := writeMessage(conn, ready{Type: typeReady}); err != nil {
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 
-	for {
-		var req execRequest
-		if err := readMessage(br, &req); err != nil {
-			if !errors.Is(err, io.EOF) {
-				fmt.Fprintf(os.Stderr, "aether-env: control read: %v\n", err)
-			}
-			return
-		}
+	// The reader runs concurrently so a cancel can be honoured while an exec is
+	// in flight; requests are served one at a time on this goroutine.
+	reqs := make(chan execRequest)
+	go controlReader(conn, br, reqs, done)
+
+	for req := range reqs {
 		switch req.Type {
 		case typeExec, "":
 			if !execActive.CompareAndSwap(false, true) {
@@ -255,12 +347,12 @@ func serveControlConn(conn *os.File) {
 					Type:     eventExited,
 					ID:       req.ID,
 					ExitCode: execBusyExitCode,
+					Busy:     true,
 					Error:    "exec service busy: another command is running",
 				})
 				continue
 			}
-			serveExec(conn, req)
-			execActive.Store(false)
+			runExecGuarded(conn, req)
 		case typeShutdown:
 			shutdownGuest()
 			return
@@ -275,30 +367,106 @@ func serveControlConn(conn *os.File) {
 	}
 }
 
-// eventSink serialises events for one exec onto one writer. stdout and stderr
-// are pumped from separate goroutines, so writes must be interlocked.
-type eventSink struct {
-	mu sync.Mutex
-	w  io.Writer
-	id string
+// runExecGuarded runs one exec while guaranteeing the single-exec gate is
+// released on every path, including a panic in a handler. Without the defer a
+// panicking or stuck handler would weld the gate shut and make every later exec
+// fail busy until the VM is destroyed.
+func runExecGuarded(conn *os.File, req execRequest) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: exec handler panic: %v\n", r)
+		}
+		execActive.Store(false)
+		// Re-arm the idle deadline so a connection abandoned after an exec is
+		// eventually closed instead of pinning its reader forever.
+		_ = conn.SetReadDeadline(time.Now().Add(controlIdleTimeout))
+	}()
+	// Clear any idle read deadline the reader installed before it saw this exec.
+	_ = conn.SetReadDeadline(time.Time{})
+	serveExec(conn, req)
 }
 
-func (s *eventSink) send(ev execEvent) {
+// controlReader reads control messages and forwards exec requests to the
+// serving loop. A cancel is handled inline (killing the running exec) so it can
+// be honoured while an exec is in flight. It returns when the peer disconnects
+// or the idle deadline fires while no exec is running.
+func controlReader(conn *os.File, br *bufio.Reader, reqs chan<- execRequest, done <-chan struct{}) {
+	defer close(reqs)
+	for {
+		if execActive.Load() {
+			// An exec is in flight: a long command may legitimately run for a
+			// while, so do not time the read out.
+			_ = conn.SetReadDeadline(time.Time{})
+		} else {
+			_ = conn.SetReadDeadline(time.Now().Add(controlIdleTimeout))
+		}
+		var req execRequest
+		if err := readMessage(br, &req); err != nil {
+			if !errors.Is(err, io.EOF) {
+				fmt.Fprintf(os.Stderr, "aether-env: control read: %v\n", err)
+			}
+			return
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		if req.Type == typeCancel {
+			cancelRunningExec()
+			continue
+		}
+		select {
+		case reqs <- req:
+		case <-done:
+			return
+		}
+	}
+}
+
+// eventSink serialises events for one exec onto one writer. stdout and stderr
+// are pumped from separate goroutines, so writes must be interlocked.
+//
+// send returns an error rather than discarding it and bounds each write with a
+// deadline, so a host that stops reading but stays connected cannot block the
+// pumps (and therefore the child) forever with the gate held.
+type eventSink struct {
+	mu     sync.Mutex
+	w      io.Writer
+	id     string
+	failed bool
+}
+
+var errSinkFailed = errors.New("event sink write failed")
+
+func (s *eventSink) send(ev execEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = writeMessage(s.w, ev)
+	if s.failed {
+		return errSinkFailed
+	}
+	if d, ok := s.w.(interface{ SetWriteDeadline(time.Time) error }); ok {
+		_ = d.SetWriteDeadline(time.Now().Add(sendWriteTimeout))
+	}
+	if err := writeMessage(s.w, ev); err != nil {
+		s.failed = true
+		return err
+	}
+	return nil
 }
 
 // serveExec runs one command and streams its result. Every failure of the
 // service itself is reported as a terminal exited event, never as a panic or a
 // dead service: a non-zero exit, a missing binary and a timeout are all normal
 // results.
-func serveExec(conn io.Writer, req execRequest) {
+func serveExec(conn *os.File, req execRequest) {
+	ctl := &execControl{}
+	setRunningExec(ctl)
+	defer clearRunningExec(ctl)
+
 	sink := &eventSink{w: conn, id: req.ID}
-	sink.send(execEvent{Type: eventStarted, ID: req.ID})
+	if err := sink.send(execEvent{Type: eventStarted, ID: req.ID}); err != nil {
+		return
+	}
 
 	if len(req.Argv) == 0 {
-		sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: "empty argv"})
+		_ = sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: "empty argv"})
 		return
 	}
 
@@ -307,53 +475,72 @@ func serveExec(conn io.Writer, req execRequest) {
 	cmd.Env = mergeEnv(os.Environ(), req.Env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	// Use explicit pipes rather than cmd.StdoutPipe so cmd.Wait does not close
+	// the read ends: completion must be gated on the child, never on pipe EOF.
+	// A child (or a setsid-escaped grandchild) that keeps the write end open
+	// would otherwise hold the single-exec gate forever.
+	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: err.Error()})
+		_ = sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: err.Error()})
 		return
 	}
-	stderrPipe, err := cmd.StderrPipe()
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
-		sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: err.Error()})
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: 1, Error: err.Error()})
 		return
 	}
+	cmd.Stdout = stdoutW
+	cmd.Stderr = stderrW
 
 	if err := cmd.Start(); err != nil {
 		// A command that cannot even start (not found, not executable) is a
 		// normal result: 127 matches the shell convention.
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+		_ = stderrR.Close()
+		_ = stderrW.Close()
 		code := 1
 		if errors.Is(err, exec.ErrNotFound) {
 			code = 127
 		}
-		sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: code, Error: err.Error()})
+		_ = sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: code, Error: err.Error()})
 		return
 	}
+	// The child owns the write ends now; close our copies so EOF is observable
+	// once every holder is gone.
+	_ = stdoutW.Close()
+	_ = stderrW.Close()
 
-	// Pump both pipes concurrently so a child that fills one pipe buffer
-	// cannot block the other, and so the service cannot deadlock on output.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); pumpOutput(stdoutPipe, sink, eventStdout) }()
-	go func() { defer wg.Done(); pumpOutput(stderrPipe, sink, eventStderr) }()
+	// Honour a cancel that raced the start.
+	if ctl.recordPID(cmd.Process.Pid) {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	// If the host stops reading, kill the process group: an abandoned exec must
+	// not run to completion.
+	kill := func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+
+	// Pump both pipes concurrently so a child that fills one pipe buffer cannot
+	// block the other, and so the service cannot deadlock on output.
+	var pumpWG sync.WaitGroup
+	pumpWG.Add(2)
+	go func() { defer pumpWG.Done(); pumpOutput(stdoutR, sink, eventStdout, kill) }()
+	go func() { defer pumpWG.Done(); pumpOutput(stderrR, sink, eventStderr, kill) }()
 
 	waitCh := make(chan error, 1)
-	go func() {
-		// Drain both pipes before reaping. cmd.Wait closes the pipes, so it
-		// must run only after all reads have completed.
-		wg.Wait()
-		waitCh <- cmd.Wait()
-	}()
+	go func() { waitCh <- cmd.Wait() }()
 
 	timedOut := false
-	if t := req.TimeoutSeconds; t > 0 {
-		timer := time.NewTimer(time.Duration(t) * time.Second)
+	if d := time.Duration(clampExecTimeout(req.TimeoutSeconds)) * time.Second; d > 0 {
+		timer := time.NewTimer(d)
 		select {
 		case <-waitCh:
 			timer.Stop()
 		case <-timer.C:
 			timedOut = true
 			// Kill the whole process group so grandchildren cannot outlive the
-			// deadline, then wait for the reaper to finish.
+			// deadline.
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			<-waitCh
 		}
@@ -361,41 +548,107 @@ func serveExec(conn io.Writer, req execRequest) {
 		<-waitCh
 	}
 
+	// The exec child is reaped (and the gate is still held, so it is the only
+	// exec child in the process): reap any unrelated children reparented to
+	// this PID 1 so double-forked daemons do not accumulate as zombies.
+	reapOrphans()
+
+	// Drain the pipes for a bounded grace only. A lingering writer must not
+	// hold the gate; past the grace the read ends are closed to unblock the
+	// pumps and the incomplete output is reported as a failure.
+	drained := make(chan struct{})
+	go func() { pumpWG.Wait(); close(drained) }()
+	lingering := false
+	select {
+	case <-drained:
+	case <-time.After(pipeDrainGrace):
+		lingering = true
+		_ = stdoutR.Close()
+		_ = stderrR.Close()
+		<-drained
+	}
+	_ = stdoutR.Close()
+	_ = stderrR.Close()
+
 	code := exitCodeFromState(cmd.ProcessState)
 	if timedOut {
 		code = processTimeoutExitCode
 	}
-	sink.send(execEvent{Type: eventExited, ID: req.ID, ExitCode: code, TimedOut: timedOut})
+	ev := execEvent{Type: eventExited, ID: req.ID, ExitCode: code, TimedOut: timedOut}
+	if lingering {
+		ev.Error = "output pipe still open after the command exited; output may be incomplete"
+		fmt.Fprintf(os.Stderr, "aether-env: exec %q left an output pipe open; closed after %v\n", req.ID, pipeDrainGrace)
+	}
+	_ = sink.send(ev)
+}
+
+// clampExecTimeout bounds a guest-side timeout to maxTimeoutSeconds so the
+// Duration conversion cannot overflow into a negative, immediately-firing
+// timer.
+func clampExecTimeout(seconds int) int {
+	if seconds <= 0 {
+		return 0
+	}
+	if seconds > maxTimeoutSeconds {
+		return maxTimeoutSeconds
+	}
+	return seconds
+}
+
+// reapOrphans reaps children reparented to this PID 1 without blocking. It must
+// only be called while the exec gate is held, so it can never steal the status
+// of a live exec child.
+func reapOrphans() {
+	for {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, syscall.WNOHANG, nil)
+		if pid <= 0 || err != nil {
+			return
+		}
+	}
 }
 
 // pumpOutput forwards r to the sink as events of kind, capped at maxStreamBytes
 // for the life of the exec. Bytes past the cap are still read (so the child is
 // never blocked on a full pipe) but dropped, with a one-time truncation note.
-func pumpOutput(r io.Reader, sink *eventSink, kind string) {
+func pumpOutput(r io.Reader, sink *eventSink, kind string, kill func()) {
 	buf := make([]byte, 32*1024)
 	remaining := maxStreamBytes
 	noted := false
+	abandoned := false
+	// note copies the reused buffer: Data must own its bytes because each event
+	// is encoded asynchronously (and the buffer is overwritten by the next
+	// Read).
+	note := func() error {
+		return sink.send(execEvent{Type: kind, ID: sink.id,
+			Data: []byte(fmt.Sprintf("\n[aether: %s truncated after %d bytes]\n", kind, maxStreamBytes))})
+	}
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
+			var sendErr error
 			if remaining <= 0 {
 				if !noted {
 					// Defensive: the note is normally emitted with the last
 					// retained chunk, below.
-					sink.send(execEvent{Type: kind, ID: sink.id,
-						Data: fmt.Sprintf("\n[aether: %s truncated after %d bytes]\n", kind, maxStreamBytes)})
+					sendErr = note()
 					noted = true
 				}
 			} else if len(chunk) > remaining {
-				sink.send(execEvent{Type: kind, ID: sink.id, Data: string(chunk[:remaining])})
-				sink.send(execEvent{Type: kind, ID: sink.id,
-					Data: fmt.Sprintf("\n[aether: %s truncated after %d bytes]\n", kind, maxStreamBytes)})
+				_ = sink.send(execEvent{Type: kind, ID: sink.id, Data: append([]byte(nil), chunk[:remaining]...)})
+				sendErr = note()
 				remaining = 0
 				noted = true
 			} else {
 				remaining -= len(chunk)
-				sink.send(execEvent{Type: kind, ID: sink.id, Data: string(chunk)})
+				sendErr = sink.send(execEvent{Type: kind, ID: sink.id, Data: append([]byte(nil), chunk...)})
+			}
+			if sendErr != nil && !abandoned {
+				// The host can no longer receive: kill the child so an
+				// abandoned exec does not run to completion.
+				abandoned = true
+				kill()
 			}
 		}
 		if err != nil {

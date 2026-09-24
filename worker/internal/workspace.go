@@ -93,6 +93,15 @@ func validateWorkspaceRequest(jobID string, sizeMB int) error {
 // removal failure does not stop the sweep (the caller is expected to log, not
 // fail startup). ttl <= 0 disables GC entirely.
 func GCWorkspaces(dir string, ttl time.Duration) (removed int, err error) {
+	return GCWorkspacesExcept(dir, ttl, nil)
+}
+
+// GCWorkspacesExcept is GCWorkspaces with a keep predicate: a workspace whose
+// base file name is kept is never removed, however old. The worker passes a
+// predicate derived from non-terminal execution records so a long-lived
+// execution's workspace cannot be swept out from under it. A nil keep predicate
+// preserves the original behaviour.
+func GCWorkspacesExcept(dir string, ttl time.Duration, keep func(name string) bool) (removed int, err error) {
 	if ttl <= 0 || dir == "" {
 		return 0, nil
 	}
@@ -109,6 +118,9 @@ func GCWorkspaces(dir string, ttl time.Duration) (removed int, err error) {
 	var errs []error
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), workspaceImageSuffix) {
+			continue
+		}
+		if keep != nil && keep(entry.Name()) {
 			continue
 		}
 		info, statErr := entry.Info()

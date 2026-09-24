@@ -36,6 +36,13 @@ type Config struct {
 	// WorkspaceTTL is how long an unused workspace image is retained before
 	// startup GC removes it. <= 0 disables GC. main.go defaults it to 24h.
 	WorkspaceTTL time.Duration
+	// ControlPort is the port of the worker control API the gateway uses for
+	// executions. main.go defaults it to 9091 (WORKER_CONTROL_PORT).
+	ControlPort int
+	// ControlToken, when non-empty, is required as a bearer token on every
+	// control API call. Unset leaves the API open, which is documented as
+	// dev-only (the control API can run arbitrary commands in a guest).
+	ControlToken string
 }
 
 type ScalingConfig struct {
