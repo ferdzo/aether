@@ -15,6 +15,13 @@
 #     Requires a bridge-mode worker (root); used by scripts/e2e-job-bridge.sh.
 #     Output: .assets/job-rootfs-mmds.ext4
 #
+#   exec-service
+#     /init execs aether-env --exec-service: a long-lived guest control service
+#     reachable over virtio-vsock. No NIC and no baked command; the host drives
+#     execs over the vsock Unix socket. Used by shared/vm/exec_service_smoke_test.go
+#     and scripts/e2e-exec.sh.
+#     Output: .assets/job-rootfs-exec.ext4
+#
 # Unprivileged: the userland comes from `docker export` and the ext4 image is
 # assembled with `mke2fs -d`, so no loop mount and no root are required.
 #
@@ -23,8 +30,10 @@
 #   scripts/build-job-rootfs.sh 'uname -a'            # baked, explicit command
 #   AETHER_JOB_COMMAND='echo hi' scripts/build-job-rootfs.sh
 #   AETHER_JOB_INIT=mmds scripts/build-job-rootfs.sh  # MMDS bootstrap (bridge mode)
+#   AETHER_JOB_INIT=exec-service scripts/build-job-rootfs.sh  # long-lived vsock service
 #
-# Output: .assets/job-rootfs.ext4 (baked) or .assets/job-rootfs-mmds.ext4 (mmds).
+# Output: .assets/job-rootfs.ext4 (baked), .assets/job-rootfs-mmds.ext4 (mmds) or
+# .assets/job-rootfs-exec.ext4 (exec-service).
 # Override either with AETHER_JOB_ROOTFS.
 set -euo pipefail
 
@@ -36,8 +45,9 @@ COMMAND="${1:-${AETHER_JOB_COMMAND:-echo hello; sleep 2; exit 42}}"
 case "${AETHER_JOB_INIT:-baked}" in
   baked) INIT_MODE=baked; DEFAULT_OUT="$ASSETS/job-rootfs.ext4" ;;
   mmds)  INIT_MODE=mmds;  DEFAULT_OUT="$ASSETS/job-rootfs-mmds.ext4" ;;
+  exec-service) INIT_MODE=exec-service; DEFAULT_OUT="$ASSETS/job-rootfs-exec.ext4" ;;
   *)
-    echo "build-job-rootfs: unknown AETHER_JOB_INIT '${AETHER_JOB_INIT:-}' (want: baked|mmds)" >&2
+    echo "build-job-rootfs: unknown AETHER_JOB_INIT '${AETHER_JOB_INIT:-}' (want: baked|mmds|exec-service)" >&2
     exit 1
     ;;
 esac
@@ -83,6 +93,25 @@ if [ -b /dev/vdb ]; then
   fi
 fi
 exec /usr/bin/aether-env
+EOF
+elif [ "$INIT_MODE" = "exec-service" ]; then
+  # Long-lived vsock exec service. No command is baked in: the host connects to
+  # the vsock Unix socket and sends exec requests over the control protocol.
+  # Mounts and the optional /dev/vdb workspace are identical to the other modes.
+  cat > "$STAGE/init" << 'EOF'
+#!/bin/sh
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+if [ -b /dev/vdb ]; then
+  mkdir -p /workspace
+  if mount -t ext4 /dev/vdb /workspace 2>/dev/null; then
+    export HOME=/workspace
+    cd /workspace
+  fi
+fi
+exec /usr/bin/aether-env --exec-service
 EOF
 else
   # Escape single quotes so COMMAND survives being wrapped in '...' below.

@@ -58,6 +58,19 @@ const (
 )
 
 func main() {
+	// Explicit, MMDS-free exec-service mode: a long-lived guest control
+	// service. It is handled first, before any boot-token/MMDS/HTTP logic, so
+	// it works with no boot token and no NIC. Unlike --process it never exits
+	// or reboots the guest when a command finishes; see exec_service.go.
+	if isExecServiceFlag(os.Args[1:]) {
+		fmt.Fprintln(os.Stderr, "aether-env: starting exec service")
+		if err := runExecService(); err != nil {
+			fmt.Fprintf(os.Stderr, "aether-env: exec service failed: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Explicit, MMDS-free process mode. This is handled before any boot-token,
 	// MMDS or HTTP logic so it works with no boot token and no NIC. The
 	// supervisor runs with no timeout and no nonce, so the sentinel is
