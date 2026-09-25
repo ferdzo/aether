@@ -60,6 +60,40 @@ func readyStore(id string) *stubStore {
 	}}
 }
 
+// Re-creating an id leaves the previous run's terminal record in place until the
+// worker overwrites it. The readiness poll must ignore that stale record rather
+// than reporting the new attempt as failed before it has even started.
+func TestCreateIgnoresStaleRecordFromPreviousAttempt(t *testing.T) {
+	api, rc := newTestAPI(t)
+
+	var calls atomic.Int32
+	api.records = &stubStore{fn: func(id string) (*protocol.ExecutionRecord, error) {
+		// First answer with the previous attempt's stopped record, then with the
+		// ready record carrying the request id this attempt published.
+		if calls.Add(1) == 1 {
+			return &protocol.ExecutionRecord{
+				ID:        id,
+				RequestID: "req-previous",
+				State:     protocol.ExecutionStateStopped,
+			}, nil
+		}
+		msgs, err := rc.Client().XRange(context.Background(), protocol.StreamProvision, "-", "+").Result()
+		if err != nil || len(msgs) == 0 {
+			return nil, ErrExecutionNotFound
+		}
+		var job protocol.Job
+		if err := json.Unmarshal([]byte(msgs[len(msgs)-1].Values["job"].(string)), &job); err != nil {
+			t.Fatalf("published job is not JSON: %v", err)
+		}
+		return &protocol.ExecutionRecord{ID: id, RequestID: job.RequestID, State: protocol.ExecutionStateReady}, nil
+	}}
+
+	rec := do(t, api, http.MethodPost, "/", `{"runtime":"exec","timeout_seconds":60,"workspace_mb":64}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("stale record must not fail the create: got %d want 201: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateValidation(t *testing.T) {
 	api, _ := newTestAPI(t)
 	api.records = &stubStore{fn: func(string) (*protocol.ExecutionRecord, error) { return nil, ErrExecutionNotFound }}

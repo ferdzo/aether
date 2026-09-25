@@ -232,7 +232,7 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), api.readyTimeout)
 	defer cancel()
 
-	rec, err := api.waitReady(ctx, execID)
+	rec, err := api.waitReady(ctx, execID, job.RequestID)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			writeExecutionError(w, http.StatusGatewayTimeout, execID, "execution did not become ready in time")
@@ -255,17 +255,28 @@ func (api *ExecutionsAPI) Create(w http.ResponseWriter, r *http.Request) {
 // waitReady polls the durable record until the worker marks the execution
 // ready. A missing record (worker still provisioning) is not an error; a
 // terminal failed state or a poll timeout is.
-func (api *ExecutionsAPI) waitReady(ctx context.Context, execID string) (*protocol.ExecutionRecord, error) {
+func (api *ExecutionsAPI) waitReady(ctx context.Context, execID, requestID string) (*protocol.ExecutionRecord, error) {
 	for {
 		rec, err := api.records.GetExecution(ctx, execID)
-		switch {
-		case err == nil && rec.State == protocol.ExecutionStateReady:
-			return rec, nil
-		case err == nil && rec.State == protocol.ExecutionStateFailed:
-			return nil, fmt.Errorf("execution %s failed: %s", execID, rec.Error)
-		case err == nil && rec.State == protocol.ExecutionStateStopped:
-			return nil, fmt.Errorf("execution %s stopped during creation", execID)
-		case err != nil && !errors.Is(err, ErrExecutionNotFound):
+		if err == nil {
+			// Only this attempt's record is authoritative. Re-creating an id
+			// leaves the previous run's terminal record in place until the
+			// worker overwrites it, so treating that as this attempt's outcome
+			// would fail a perfectly valid re-create before the worker has even
+			// started. The worker stamps the request id on every record it
+			// writes for the attempt. An empty request id means the record
+			// predates the field, where the old behaviour is the only option.
+			if requestID == "" || rec.RequestID == "" || rec.RequestID == requestID {
+				switch rec.State {
+				case protocol.ExecutionStateReady:
+					return rec, nil
+				case protocol.ExecutionStateFailed:
+					return nil, fmt.Errorf("execution %s failed: %s", execID, rec.Error)
+				case protocol.ExecutionStateStopped:
+					return nil, fmt.Errorf("execution %s stopped during creation", execID)
+				}
+			}
+		} else if !errors.Is(err, ErrExecutionNotFound) {
 			return nil, err
 		}
 

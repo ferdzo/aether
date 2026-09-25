@@ -25,7 +25,12 @@ const EtcdExecutionPrefix = "/executions/"
 // invisible to the scaler (never added to Worker.instances), exactly like
 // process jobs.
 type ExecutionRecord struct {
-	ID         string `json:"id"`
+	ID string `json:"id"`
+	// RequestID identifies the creation attempt that wrote this record.
+	// Re-creating an id overwrites the previous run's terminal record, and a
+	// client waiting for readiness can observe that stale record before the
+	// worker has written the new one, so the poll matches on this field.
+	RequestID  string `json:"request_id,omitempty"`
 	State      string `json:"state"`
 	WorkerID   string `json:"worker_id,omitempty"`
 	WorkerAddr string `json:"worker_addr,omitempty"`

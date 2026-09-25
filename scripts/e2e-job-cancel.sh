@@ -128,7 +128,7 @@ log "building worker"
 
 : > "$WORKER_LOG"
 log "starting worker (NET_MODE=none) -> $WORKER_LOG"
-WORKER_ID="e2e-cancel-worker-$$" WORKER_IP=127.0.0.1 \
+WORKER_CONTROL_PORT=19103 WORKER_ID="e2e-cancel-worker-$$" WORKER_IP=127.0.0.1 \
 REDIS_ADDR="127.0.0.1:$REDIS_PORT" ETCD_ENDPOINTS="127.0.0.1:$ETCD_PORT" \
 FIRECRACKER_BIN="$ROOT/.assets/bin/firecracker" KERNEL_PATH="$ROOT/.assets/vmlinux" \
 RUNTIME_PATH="$CANCEL_ROOTFS" \

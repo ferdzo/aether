@@ -101,6 +101,7 @@ type Execution struct {
 	vsockPath     string
 	workerAddr    string
 	startedAt     time.Time
+	requestID     string
 
 	mu       sync.Mutex
 	busy     bool
@@ -275,6 +276,7 @@ func (w *Worker) reconcileExecutions(ctx context.Context) {
 		}
 		failed := protocol.ExecutionRecord{
 			ID:            rec.ID,
+			RequestID:     rec.RequestID,
 			State:         protocol.ExecutionStateFailed,
 			WorkerID:      w.workerID(),
 			WorkerAddr:    rec.WorkerAddr,
@@ -430,6 +432,17 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		}
 	}
 
+	// Reclaim a retained workspace image BEFORE writing the creating record.
+	// The reclaim check is state-based and only a terminal record is safe to
+	// reclaim (see removeStaleExecutionWorkspace), so once this attempt writes
+	// creating/ready the record looks live to itself and the image would never
+	// be removed. Destroy keeps the workspace by design, so re-creating a used
+	// id depends on this happening first: CreateWorkspace refuses to reuse an
+	// existing file.
+	if job.WorkspaceMB > 0 {
+		w.removeStaleExecutionWorkspace(execID)
+	}
+
 	// A creating record is written before any VM work. It gives the gateway a
 	// non-terminal state to poll (so a provisioning failure is reported as 502
 	// rather than discovered only by a 504 timeout), and it closes the durable
@@ -438,6 +451,7 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 	startedAt := time.Now().UTC()
 	creating := protocol.ExecutionRecord{
 		ID:         execID,
+		RequestID:  job.RequestID,
 		State:      protocol.ExecutionStateCreating,
 		WorkerID:   w.workerID(),
 		WorkerAddr: w.controlAddr(),
@@ -452,6 +466,7 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 	fail := func(err error) error {
 		failed := protocol.ExecutionRecord{
 			ID:         execID,
+			RequestID:  job.RequestID,
 			State:      protocol.ExecutionStateFailed,
 			WorkerID:   w.workerID(),
 			WorkerAddr: w.controlAddr(),
@@ -491,12 +506,11 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 
 	// Workspace: create the backing image before launch. A declared drive that
 	// does not exist is a hard Firecracker error, so a creation failure is a
-	// provisioning failure and must not ACK. A terminal record for this id
-	// (stopped/failed) left a retained image behind; remove it so POST ->
-	// DELETE -> POST with the same id can rebuild.
+	// provisioning failure and must not ACK. Any retained image from a previous
+	// execution with this id was reclaimed above, before the creating record
+	// was written.
 	var workspacePath string
 	if job.WorkspaceMB > 0 {
-		w.removeStaleExecutionWorkspace(execID)
 		wsPath, err := createJobWorkspace(w.cfg.WorkspaceDir, execID, job.WorkspaceMB)
 		if err != nil {
 			return fail(fmt.Errorf("failed to create execution workspace: %w", err))
@@ -567,6 +581,7 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 		vsockPath:     vsockPath,
 		workerAddr:    w.controlAddr(),
 		startedAt:     startedAt,
+		requestID:     job.RequestID,
 	}
 
 	// Watch for guest death. instance.Stop sets a stopping status, so the
@@ -613,6 +628,7 @@ func (w *Worker) startExecution(ctx context.Context, job protocol.Job) error {
 
 	rec := protocol.ExecutionRecord{
 		ID:            execID,
+		RequestID:     job.RequestID,
 		State:         protocol.ExecutionStateReady,
 		WorkerID:      w.workerID(),
 		WorkerAddr:    w.controlAddr(),
@@ -712,6 +728,7 @@ func (w *Worker) destroyExecution(id string) error {
 
 	rec := protocol.ExecutionRecord{
 		ID:            id,
+		RequestID:     exec.requestID,
 		State:         protocol.ExecutionStateStopped,
 		WorkerID:      w.workerID(),
 		WorkerAddr:    exec.workerAddr,
