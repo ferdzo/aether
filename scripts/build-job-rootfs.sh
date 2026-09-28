@@ -34,7 +34,8 @@
 #
 # Output: .assets/job-rootfs.ext4 (baked), .assets/job-rootfs-mmds.ext4 (mmds) or
 # .assets/job-rootfs-exec.ext4 (exec-service).
-# Override either with AETHER_JOB_ROOTFS.
+# Override either with AETHER_JOB_ROOTFS. Image size defaults to 128M and is
+# overridden with AETHER_JOB_ROOTFS_SIZE (e.g. 512M for a language runtime).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -52,6 +53,10 @@ case "${AETHER_JOB_INIT:-baked}" in
     ;;
 esac
 OUT="${AETHER_JOB_ROOTFS:-$DEFAULT_OUT}"
+# Size passed to mke2fs. The plain userland fits in the 128M default, but
+# richer exec-service images (a language runtime plus tooling) need more;
+# override with e.g. AETHER_JOB_ROOTFS_SIZE=512M.
+SIZE="${AETHER_JOB_ROOTFS_SIZE:-128M}"
 
 command -v docker >/dev/null 2>&1 || { echo "build-job-rootfs: docker not found in PATH" >&2; exit 1; }
 command -v mke2fs >/dev/null 2>&1 || { echo "build-job-rootfs: mke2fs not found (install e2fsprogs)" >&2; exit 1; }
@@ -64,7 +69,20 @@ echo ">> building aether-env"
 
 echo ">> exporting $BASE userland"
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
+TMP_CTX=""
+IMG_TAG=""
+CID=""
+cleanup() {
+  rm -rf "$STAGE"
+  # These resources are only created in exec-service mode. Keep cleanup
+  # best-effort so an earlier build/export failure remains the exit status.
+  if [ "$INIT_MODE" = "exec-service" ]; then
+    if [ -n "$CID" ]; then docker rm "$CID" >/dev/null 2>&1 || true; fi
+    if [ -n "$IMG_TAG" ]; then docker rmi "$IMG_TAG" >/dev/null 2>&1 || true; fi
+    if [ -n "$TMP_CTX" ]; then rm -rf "$TMP_CTX"; fi
+  fi
+}
+trap cleanup EXIT
 
 if [ "$INIT_MODE" = "exec-service" ]; then
   # The dev-workflow exec-service image must be able to run `git clone`, so it
@@ -78,9 +96,6 @@ if [ "$INIT_MODE" = "exec-service" ]; then
   docker build -q -t "$IMG_TAG" "$TMP_CTX" >/dev/null
   CID="$(docker create "$IMG_TAG" true)"
   docker export "$CID" | tar -C "$STAGE" -xf -
-  docker rm "$CID" >/dev/null
-  docker rmi "$IMG_TAG" >/dev/null 2>&1 || true
-  rm -rf "$TMP_CTX"
 else
   CID="$(docker create "$BASE" true)"
   docker export "$CID" | tar -C "$STAGE" -xf -
@@ -172,9 +187,9 @@ if [ "$INIT_MODE" = "exec-service" ]; then
   mkdir -p "$STAGE/workspace"
 fi
 
-echo ">> assembling $OUT"
+echo ">> assembling $OUT ($SIZE)"
 rm -f "$OUT"
-mke2fs -q -F -t ext4 -m 0 -d "$STAGE" "$OUT" 128M
+mke2fs -q -F -t ext4 -m 0 -d "$STAGE" "$OUT" "$SIZE"
 
 echo
 echo "job rootfs ready: $OUT"
