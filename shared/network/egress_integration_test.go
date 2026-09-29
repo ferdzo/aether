@@ -238,11 +238,7 @@ func TestGuestEgressBridgeMode(t *testing.T) {
 		t.Fatalf("EnsureBridge: %v", err)
 	}
 
-	extIface, err := GetDefaultInterface()
-	if err != nil {
-		t.Fatalf("GetDefaultInterface: %v", err)
-	}
-	if err := bm.SetupNAT(extIface); err != nil {
+	if err := bm.SetupNAT(); err != nil {
 		t.Fatalf("SetupNAT: %v", err)
 	}
 

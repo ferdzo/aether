@@ -128,22 +128,24 @@ func parseGuestDNS(raw string) []string {
 	return dns
 }
 
-// setupEgressNAT installs host-side NAT for whichever network mode is active,
-// using the host default interface. bridgeName is empty in netns mode, where
-// the rules are scoped by subnet instead.
+// setupEgressNAT installs host-side NAT for whichever network mode is active.
+// bridgeName is empty in netns mode, where the rules are scoped by subnet.
+//
+// The rules are interface-agnostic: they are scoped by subnet (and bridge), so
+// a destination routed out a non-default interface (e.g. a VPN overlay) is
+// still masqueraded. The default interface is only reported for diagnostics;
+// its absence no longer disables egress NAT.
 func setupEgressNAT(mode, bridgeName, cidr string) {
-	extIface, err := network.GetDefaultInterface()
-	if err != nil {
-		logger.Warn("egress NAT unavailable: no default interface detected", "mode", mode, "error", err)
-		return
-	}
-
 	nat := network.NewBridgeManager(bridgeName, cidr)
-	if err := nat.SetupNAT(extIface); err != nil {
+	if err := nat.SetupNAT(); err != nil {
 		logger.Warn("egress NAT setup failed; functions remain isolated", "mode", mode, "error", err)
 		return
 	}
-	logger.Info("egress NAT configured", "mode", mode, "external_iface", extIface)
+	if extIface, err := network.GetDefaultInterface(); err == nil {
+		logger.Info("egress NAT configured", "mode", mode, "default_iface", extIface)
+	} else {
+		logger.Info("egress NAT configured", "mode", mode)
+	}
 }
 
 func main() {

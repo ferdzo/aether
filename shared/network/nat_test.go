@@ -161,13 +161,13 @@ func TestSetupNATBridgeModeIsIdempotent(t *testing.T) {
 	env := newStubEnv(t)
 	bm := NewBridgeManager("br0", "172.16.0.0/24")
 
-	if err := bm.SetupNAT("eth0"); err != nil {
+	if err := bm.SetupNAT(); err != nil {
 		t.Fatalf("first SetupNAT: %v", err)
 	}
 	first := env.calls(t)
 
 	// Second run must probe every rule with -C and add nothing.
-	if err := bm.SetupNAT("eth0"); err != nil {
+	if err := bm.SetupNAT(); err != nil {
 		t.Fatalf("second SetupNAT: %v", err)
 	}
 	all := env.calls(t)
@@ -183,9 +183,9 @@ func TestSetupNATBridgeModeIsIdempotent(t *testing.T) {
 		t.Fatalf("second run must not append rules again:\n%s", strings.Join(second, "\n"))
 	}
 
-	requireCall(t, all, "iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -o eth0 -j MASQUERADE")
-	requireCall(t, all, "iptables -A FORWARD -i br0 -o eth0 -j ACCEPT")
-	requireCall(t, all, "iptables -A FORWARD -i eth0 -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+	requireCall(t, all, "iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -j MASQUERADE")
+	requireCall(t, all, "iptables -A FORWARD -i br0 ! -o br0 -j ACCEPT")
+	requireCall(t, all, "iptables -A FORWARD -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT")
 	requireCall(t, all, "sysctl -w net.ipv4.ip_forward=1")
 }
 
@@ -193,13 +193,13 @@ func TestSetupNATNetnsModeScopesBySubnet(t *testing.T) {
 	env := newStubEnv(t)
 	bm := NewBridgeManager("", "172.31.0.0/16")
 
-	if err := bm.SetupNAT("eth0"); err != nil {
+	if err := bm.SetupNAT(); err != nil {
 		t.Fatalf("SetupNAT: %v", err)
 	}
 	ccalls := env.calls(t)
 
-	requireCall(t, ccalls, "iptables -A FORWARD -s 172.31.0.0/16 -o eth0 -j ACCEPT")
-	requireCall(t, ccalls, "iptables -A FORWARD -i eth0 -d 172.31.0.0/16 -m state --state RELATED,ESTABLISHED -j ACCEPT")
+	requireCall(t, ccalls, "iptables -A FORWARD -s 172.31.0.0/16 -j ACCEPT")
+	requireCall(t, ccalls, "iptables -A FORWARD -d 172.31.0.0/16 -m state --state RELATED,ESTABLISHED -j ACCEPT")
 
 	// No malformed empty interface selector may be generated.
 	if strings.Contains(strings.Join(ccalls, "\n"), "-i  ") {
@@ -212,7 +212,7 @@ func TestSetupNATPropagatesIptablesFailure(t *testing.T) {
 	env.replaceBinary(t, "iptables", "#!/bin/sh\necho 'boom: permission denied' >&2\nexit 1\n")
 
 	bm := NewBridgeManager("br0", "172.16.0.0/24")
-	err := bm.SetupNAT("eth0")
+	err := bm.SetupNAT()
 	if err == nil {
 		t.Fatal("expected SetupNAT to fail when iptables fails")
 	}
@@ -226,7 +226,7 @@ func TestSetupNATPropagatesSysctlFailure(t *testing.T) {
 	env.replaceBinary(t, "sysctl", "#!/bin/sh\necho 'sysctl unavailable' >&2\nexit 3\n")
 
 	bm := NewBridgeManager("br0", "172.16.0.0/24")
-	err := bm.SetupNAT("eth0")
+	err := bm.SetupNAT()
 	if err == nil {
 		t.Fatal("expected SetupNAT to fail when sysctl fails")
 	}
@@ -235,11 +235,29 @@ func TestSetupNATPropagatesSysctlFailure(t *testing.T) {
 	}
 }
 
-func TestSetupNATRejectsEmptyExternalInterface(t *testing.T) {
-	newStubEnv(t)
+// TestSetupNATDoesNotPinEgressToDefaultInterface is the regression test for the
+// bug where egress was scoped to the host's default interface: a destination
+// routed out a non-default interface (e.g. a VPN overlay) was silently dropped
+// because neither MASQUERADE nor FORWARD matched its real output interface.
+func TestSetupNATDoesNotPinEgressToDefaultInterface(t *testing.T) {
+	env := newStubEnv(t)
 	bm := NewBridgeManager("br0", "172.16.0.0/24")
-	if err := bm.SetupNAT(""); err == nil {
-		t.Fatal("expected an error for an empty external interface")
+
+	if err := bm.SetupNAT(); err != nil {
+		t.Fatalf("SetupNAT: %v", err)
+	}
+	calls := env.calls(t)
+
+	requireCall(t, calls, "iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -j MASQUERADE")
+	requireCall(t, calls, "iptables -A FORWARD -i br0 ! -o br0 -j ACCEPT")
+
+	joined := strings.Join(calls, "\n")
+	if strings.Contains(joined, "-o eth0") {
+		t.Fatalf("egress must not be pinned to a default interface:\n%s", joined)
+	}
+	// The masquerade is source-scoped only: it must not name an output interface.
+	if strings.Contains(joined, "-s 172.16.0.0/24 -o ") {
+		t.Fatalf("masquerade must not be pinned to an output interface:\n%s", joined)
 	}
 }
 
