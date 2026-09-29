@@ -247,17 +247,22 @@ func (bm *BridgeManager) NextTAPName() string {
 
 // SetupNAT installs the egress NAT rules for the manager's subnet.
 //
-// Bridge mode (BridgeName set) scopes the FORWARD rules to that bridge. Netns
-// mode (empty bridge name) has no single bridge: per-instance traffic arrives
-// on host-side veths, so the rules are scoped to the subnet instead. Passing an
-// empty bridge name therefore produces no malformed "-i \"\"" rules.
+// The rules are scoped by the guest subnet — and, in bridge mode, by the input
+// bridge — and deliberately NOT by the host's default interface. A destination
+// may be routed out an interface other than the default (VPN overlays, policy
+// routes, secondary uplinks); pinning egress to the default interface silently
+// drops such traffic even though the host itself can reach it. The kernel
+// chooses the real output interface per destination, and a subnet-scoped
+// masquerade applies no matter which interface that turns out to be.
+//
+// Bridge mode (BridgeName set) accepts guest egress out any interface except
+// back onto the same bridge, and accepts the return direction on the bridge.
+// Netns mode (empty bridge name) has no single bridge to name, so both
+// directions are scoped by subnet instead.
 //
 // All rules are checked before being added, so this is idempotent and safe to
 // call on every worker start. Errors are returned (never silently dropped).
-func (bm *BridgeManager) SetupNAT(externalInterface string) error {
-	if externalInterface == "" {
-		return fmt.Errorf("cannot configure egress NAT without an external interface")
-	}
+func (bm *BridgeManager) SetupNAT() error {
 	if bm.Subnet == nil {
 		return fmt.Errorf("cannot configure egress NAT without a subnet")
 	}
@@ -269,28 +274,30 @@ func (bm *BridgeManager) SetupNAT(externalInterface string) error {
 	subnet := bm.Subnet.String()
 	var errs []error
 
+	// Source-scoped masquerade: covers whichever egress interface the route
+	// selects, so non-default-route destinations are NATed too.
 	if err := iptablesEnsure("nat", "POSTROUTING",
-		"-s", subnet, "-o", externalInterface, "-j", "MASQUERADE"); err != nil {
+		"-s", subnet, "-j", "MASQUERADE"); err != nil {
 		errs = append(errs, fmt.Errorf("masquerade rule: %w", err))
 	}
 
 	if bm.BridgeName != "" {
 		if err := iptablesEnsure("", "FORWARD",
-			"-i", bm.BridgeName, "-o", externalInterface, "-j", "ACCEPT"); err != nil {
+			"-i", bm.BridgeName, "!", "-o", bm.BridgeName, "-j", "ACCEPT"); err != nil {
 			errs = append(errs, fmt.Errorf("egress forward rule: %w", err))
 		}
 		if err := iptablesEnsure("", "FORWARD",
-			"-i", externalInterface, "-o", bm.BridgeName,
+			"-o", bm.BridgeName,
 			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"); err != nil {
 			errs = append(errs, fmt.Errorf("return forward rule: %w", err))
 		}
 	} else {
 		if err := iptablesEnsure("", "FORWARD",
-			"-s", subnet, "-o", externalInterface, "-j", "ACCEPT"); err != nil {
+			"-s", subnet, "-j", "ACCEPT"); err != nil {
 			errs = append(errs, fmt.Errorf("egress forward rule: %w", err))
 		}
 		if err := iptablesEnsure("", "FORWARD",
-			"-i", externalInterface, "-d", subnet,
+			"-d", subnet,
 			"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"); err != nil {
 			errs = append(errs, fmt.Errorf("return forward rule: %w", err))
 		}
